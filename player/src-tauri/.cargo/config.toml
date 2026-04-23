@@ -1,0 +1,30 @@
+# Flags spécifiques Android — strip la debuginfo de la lib Rust pour
+# produire un APK debug raisonnable (~40-60 Mo au lieu de ~200 Mo).
+# Un build debug "normal" embarque 150+ Mo de symboles Rust dans la
+# .so packagée par AGP. On garde --debug côté Tauri (signé auto avec la
+# clé debug → installable direct sur Android), mais la lib Rust elle-même
+# est strippée. Les backtraces restent utilisables via adb logcat, juste
+# sans numéros de ligne Rust — acceptable pour un APK partagé à un
+# testeur. `opt-level=1` donne une compression supplémentaire sans
+# ralentir significativement la compile.
+#
+# IMPORTANT : `-C debug-assertions=on` est obligatoire dès qu'on met
+# `opt-level >= 1`. rustc désactive debug_assertions par défaut quand
+# opt-level n'est pas 0, et tauri-utils 2.8.3 gate `ResolvedCommandReference`
+# derrière `#[cfg(debug_assertions)]`. Sans le flag explicite, le macro
+# `tauri::generate_context!()` réfère un struct absent et la compile se
+# casse en E0422 sur le target Android.
+#
+# Desktop (macOS, `tauri dev`) n'est PAS affecté : les flags sont
+# target-scopés.
+[target.aarch64-linux-android]
+rustflags = ["-C", "strip=debuginfo", "-C", "opt-level=1", "-C", "debug-assertions=on"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "strip=debuginfo", "-C", "opt-level=1", "-C", "debug-assertions=on"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "strip=debuginfo", "-C", "opt-level=1", "-C", "debug-assertions=on"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "strip=debuginfo", "-C", "opt-level=1", "-C", "debug-assertions=on"]
