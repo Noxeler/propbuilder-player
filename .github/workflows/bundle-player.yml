@@ -99,6 +99,21 @@ jobs:
             '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
             "$CONF" > tmp.json && mv tmp.json "$CONF"
 
+      - name: Generate icons from custom icon (if any)
+        working-directory: player/public
+        run: |
+          ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' project.json)
+          if [ -z "$ICON_DATA" ]; then
+            echo "No custom icon, using default."
+            exit 0
+          fi
+          echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > /tmp/src.png
+          convert /tmp/src.png -resize 512x512 ../src-tauri/icons/icon.png
+          convert /tmp/src.png -resize 128x128 ../src-tauri/icons/128x128.png
+          convert /tmp/src.png -resize 256x256 ../src-tauri/icons/128x128@2x.png
+          convert /tmp/src.png -resize 32x32 ../src-tauri/icons/32x32.png
+          echo "Custom icon applied ($(du -h /tmp/src.png | cut -f1))"
+
       - name: Init Tauri Android project
         working-directory: player
         env:
@@ -298,6 +313,23 @@ jobs:
           jq --argjson w "$WIDTH" --argjson h "$HEIGHT" --arg n "$NAME" \
             '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
             "$CONF" > tmp.json && mv tmp.json "$CONF"
+
+      - name: Generate icons from custom icon (if any)
+        working-directory: player/public
+        shell: bash
+        run: |
+          ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' project.json)
+          if [ -z "$ICON_DATA" ]; then
+            echo "No custom icon, using default."
+            exit 0
+          fi
+          echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > /tmp/src.png
+          magick /tmp/src.png -resize 512x512 ../src-tauri/icons/icon.png
+          magick /tmp/src.png -resize 128x128 ../src-tauri/icons/128x128.png
+          magick /tmp/src.png -resize 256x256 ../src-tauri/icons/128x128@2x.png
+          magick /tmp/src.png -resize 32x32 ../src-tauri/icons/32x32.png
+          magick /tmp/src.png -define icon:auto-resize=256,128,64,32,16 ../src-tauri/icons/icon.ico
+          echo "Custom icon applied."
 
       - name: Build EXE (NSIS installer, unsigned)
         working-directory: player
