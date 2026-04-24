@@ -1,0 +1,244 @@
+name: iOS Ad Hoc IPA
+
+run-name: "iOS ${{ inputs.app_slug }} for token ${{ inputs.token }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      token:
+        description: 'Enrollment token (used as IPA filename + callback path)'
+        required: true
+        type: string
+      slug:
+        description: 'Project slug'
+        required: true
+        type: string
+      app_slug:
+        description: 'App slug'
+        required: true
+        type: string
+      share_token:
+        description: 'Project share token (if private)'
+        required: false
+        type: string
+        default: ''
+      bundle_id:
+        description: 'iOS bundle identifier (com.propbuilder.player.<slug>-<app>)'
+        required: true
+        type: string
+      profile_base64:
+        description: 'Ad Hoc .mobileprovision encoded base64 (regenerated per device)'
+        required: true
+        type: string
+      callback_url:
+        description: 'API URL to POST when IPA is uploaded (auth via x-resign-secret)'
+        required: true
+        type: string
+
+env:
+  VPS_HOST: 217.182.60.238
+  VPS_USER: noxel
+  DATA_DIR: /var/www/propbuilder-data
+  TEAM_ID: 9MAHFLX3AK
+
+jobs:
+  ios:
+    name: iOS Ad Hoc IPA
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: player/package-lock.json
+
+      - name: Set up Rust (iOS targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: player/src-tauri
+
+      - name: Install Player dependencies
+        working-directory: player
+        run: npm ci
+
+      - name: Fetch project data from VPS
+        working-directory: player/public
+        env:
+          SLUG: ${{ inputs.slug }}
+          APP_SLUG: ${{ inputs.app_slug }}
+          SHARE_TOKEN: ${{ inputs.share_token }}
+        run: |
+          QS=""
+          if [ -n "${SHARE_TOKEN}" ]; then QS="?share=${SHARE_TOKEN}"; fi
+          curl -sSf "https://propbuilder.noxelstudio.com/api/public/preview/${SLUG}/${APP_SLUG}${QS}" -o raw.json
+          jq --arg app "${APP_SLUG}" '.project | .apps |= map(select(.slug == $app or .id == $app))' raw.json > project.json
+          rm raw.json
+          echo "Fetched project.json for ${APP_SLUG} ($(wc -c < project.json) bytes)"
+          NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
+          echo "App display name: ${NAME}"
+          CONF=../src-tauri/tauri.conf.json
+          jq --arg n "$NAME" '.productName = $n | .app.windows[0].title = $n' "$CONF" > tmp.json && mv tmp.json "$CONF"
+
+      - name: Generate iOS icons from custom icon (if any)
+        working-directory: player/public
+        run: |
+          ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' project.json)
+          if [ -z "$ICON_DATA" ]; then
+            echo "No custom icon; Tauri default will be used."
+            exit 0
+          fi
+          ICON_TMP=$(mktemp -d)
+          echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > "$ICON_TMP/src.png"
+          # The .png Tauri uses to generate iOS asset catalog when initializing.
+          sips -z 1024 1024 "$ICON_TMP/src.png" --out ../src-tauri/icons/icon.png >/dev/null
+          echo "Custom icon applied."
+
+      - name: Import Apple distribution certificate
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DIST_CERT_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DIST_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          P12_PATH="$RUNNER_TEMP/dist.p12"
+          echo "$P12_BASE64" | base64 -d > "$P12_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          rm -f "$P12_PATH"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "Imported distribution cert into temporary keychain."
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        env:
+          PROFILE_B64: ${{ inputs.profile_base64 }}
+        run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "$PROFILE_B64" | base64 -d > "$RUNNER_TEMP/build.mobileprovision"
+          # Extract UUID and copy to expected path (Apple looks up profiles by UUID).
+          PROFILE_UUID=$(security cms -D -i "$RUNNER_TEMP/build.mobileprovision" | plutil -extract UUID raw -)
+          PROFILE_NAME=$(security cms -D -i "$RUNNER_TEMP/build.mobileprovision" | plutil -extract Name raw -)
+          cp "$RUNNER_TEMP/build.mobileprovision" "$PROFILE_DIR/${PROFILE_UUID}.mobileprovision"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "Installed profile $PROFILE_NAME ($PROFILE_UUID)"
+
+      - name: Configure Tauri iOS bundle identifier
+        working-directory: player
+        env:
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          CONF=src-tauri/tauri.conf.json
+          jq --arg b "$BUNDLE_ID" '.identifier = $b' "$CONF" > tmp.json && mv tmp.json "$CONF"
+          echo "Set bundle identifier to $BUNDLE_ID"
+
+      - name: Init Tauri iOS project
+        working-directory: player
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ env.TEAM_ID }}
+        run: npm run tauri ios init
+
+      - name: Build iOS IPA (Ad Hoc signed)
+        working-directory: player
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ env.TEAM_ID }}
+        run: |
+          # Tauri delegates to xcodebuild. We need the export options to use ad-hoc signing
+          # with our specific provisioning profile.
+          BUNDLE_ID="${{ inputs.bundle_id }}"
+          cat > /tmp/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+            <key>compileBitcode</key>
+            <false/>
+            <key>thinning</key>
+            <string>&lt;none&gt;</string>
+          </dict>
+          </plist>
+          EOF
+          npm run tauri ios build -- --export-method ad-hoc
+
+      - name: Locate IPA
+        id: find_ipa
+        run: |
+          IPA=$(find player/src-tauri/gen/apple/build -name "*.ipa" | head -1)
+          if [ -z "$IPA" ]; then
+            echo "No IPA produced. Searching wider..."
+            IPA=$(find player -name "*.ipa" | head -1)
+          fi
+          if [ -z "$IPA" ]; then
+            echo "Build did not produce an IPA"
+            find player -name "*.ipa" -o -name "*.app" || true
+            exit 1
+          fi
+          echo "Found IPA: $IPA ($(du -h "$IPA" | cut -f1))"
+          echo "path=$IPA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH to VPS
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload IPA to VPS
+        env:
+          IPA_PATH: ${{ steps.find_ipa.outputs.path }}
+          TOKEN: ${{ inputs.token }}
+          SLUG: ${{ inputs.slug }}
+          APP_SLUG: ${{ inputs.app_slug }}
+        run: |
+          REMOTE_DIR="${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/ios-enrollments"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${REMOTE_DIR}"
+          scp "${IPA_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${REMOTE_DIR}/${TOKEN}.ipa"
+          echo "Uploaded IPA to ${REMOTE_DIR}/${TOKEN}.ipa"
+
+      - name: Notify API that IPA is ready
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_SECRET: ${{ secrets.IOS_RESIGN_CALLBACK_SECRET }}
+          TOKEN: ${{ inputs.token }}
+        run: |
+          curl -sSf -X POST "${CALLBACK_URL}" \
+            -H "Content-Type: application/json" \
+            -H "x-resign-secret: ${CALLBACK_SECRET}" \
+            -d "{\"token\":\"${TOKEN}\",\"status\":\"ipa_ready\"}"
+          echo "Callback delivered."
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
