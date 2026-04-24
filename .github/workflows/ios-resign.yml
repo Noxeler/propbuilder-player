@@ -156,7 +156,7 @@ jobs:
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ env.TEAM_ID }}
         run: |
-          # Tauri delegates to xcodebuild. We need the export options to use ad-hoc signing
+          # Tauri delegates to xcodebuild. We need the export options to use release-testing signing
           # with our specific provisioning profile.
           BUNDLE_ID="${{ inputs.bundle_id }}"
           cat > /tmp/ExportOptions.plist <<EOF
@@ -165,7 +165,7 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>method</key>
-            <string>ad-hoc</string>
+            <string>release-testing</string>
             <key>teamID</key>
             <string>${TEAM_ID}</string>
             <key>signingStyle</key>
@@ -184,7 +184,7 @@ jobs:
           </dict>
           </plist>
           EOF
-          npm run tauri ios build -- --export-method ad-hoc
+          npm run tauri ios build -- --export-method release-testing
 
       - name: Locate IPA
         id: find_ipa
