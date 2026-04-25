@@ -209,16 +209,43 @@ jobs:
             fi
             echo "Source .app: $APP"
             codesign -dvv "$APP" 2>&1 | sed 's/^/  /' || true
-            # Re-sign deep before packaging. xcodebuild signs the .app, but
+            # Re-sign deep from scratch. xcodebuild signs the .app, but
             # subsequent tauri/xcodebuild steps (failed exportArchive, asset
-            # post-processing) can modify nested files, breaking the seal.
+            # post-processing) modify nested files, breaking the seal.
             # codesign --verify then reports "sealed resource is missing or
             # invalid" and iOS rejects install with "couldn't verify integrity".
-            echo "Re-signing .app deep with existing entitlements…"
+            #
+            # Re-signing with --preserve-metadata is not enough (still broken),
+            # so we (1) extract the existing entitlements, (2) remove the
+            # _CodeSignature dirs (incl. nested frameworks/dylibs), (3) re-sign
+            # bottom-up with explicit entitlements so CodeResources is rebuilt
+            # from scratch.
             CODESIGN_IDENTITY="Apple Distribution: Pierre Loret (${{ env.TEAM_ID }})"
-            codesign --force --deep --sign "$CODESIGN_IDENTITY" \
-              --preserve-metadata=identifier,entitlements,flags \
+            ENTITLEMENTS="$RUNNER_TEMP/entitlements.plist"
+            echo "Extracting entitlements…"
+            codesign -d --entitlements :- "$APP" > "$ENTITLEMENTS" 2>/dev/null || true
+            if [ ! -s "$ENTITLEMENTS" ]; then
+              echo "ERROR: failed to extract entitlements" >&2
+              exit 1
+            fi
+            echo "Entitlements ($(wc -c < "$ENTITLEMENTS") bytes):"
+            cat "$ENTITLEMENTS" | sed 's/^/  /'
+            echo "Listing nested signables before strip…"
+            find "$APP" -type d \( -name "*.framework" -o -name "*.dylib" -o -name "*.appex" \) 2>/dev/null | sed 's/^/  /'
+            echo "Removing existing _CodeSignature dirs…"
+            find "$APP" -type d -name "_CodeSignature" -print -exec rm -rf {} + 2>/dev/null || true
+            echo "Re-signing nested frameworks/dylibs/appex…"
+            while IFS= read -r NESTED; do
+              [ -z "$NESTED" ] && continue
+              echo "  signing: $NESTED"
+              codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$NESTED" 2>&1 | sed 's/^/    /' || true
+            done < <(find "$APP" \( -name "*.framework" -o -name "*.dylib" -o -name "*.appex" \) -prune)
+            echo "Re-signing top-level .app with entitlements…"
+            codesign --force --sign "$CODESIGN_IDENTITY" \
+              --entitlements "$ENTITLEMENTS" \
               --timestamp=none "$APP" 2>&1 | sed 's/^/  /' || true
+            echo "Verifying re-signed .app (in DerivedData)…"
+            codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/  /' || true
             IPA_DIR="player/src-tauri/gen/apple/build"
             mkdir -p "$IPA_DIR"
             IPA="$IPA_DIR/$(basename "$APP" .app).ipa"
@@ -258,11 +285,19 @@ jobs:
           codesign -dvv "$APP_IN_IPA" 2>&1 || true
           echo
           echo "=== codesign --verify --deep --strict ==="
-          if codesign --verify --deep --strict --verbose=2 "$APP_IN_IPA" 2>&1; then
+          if codesign --verify --deep --strict --verbose=4 "$APP_IN_IPA" 2>&1; then
             echo "OK: codesign verifies."
           else
             echo "WARNING: codesign --verify failed. iOS will reject install."
-            # Continue anyway so we get the upload + can inspect on VPS.
+            echo
+            echo "=== Bundle contents (top level) ==="
+            ls -la "$APP_IN_IPA" | sed 's/^/  /'
+            echo
+            echo "=== Sealed resources (CodeResources hashes section) ==="
+            plutil -extract files2 xml1 -o - "$APP_IN_IPA/_CodeSignature/CodeResources" 2>&1 | head -100 | sed 's/^/  /'
+            echo
+            echo "=== All files (excl. _CodeSignature) ==="
+            find "$APP_IN_IPA" -type f -not -path "*/_CodeSignature/*" | sed 's|.*\.app/||' | sort | sed 's/^/  /'
           fi
           echo
           echo "=== embedded.mobileprovision (Name + UUID + Devices) ==="
