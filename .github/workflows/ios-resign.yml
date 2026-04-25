@@ -84,8 +84,21 @@ jobs:
           echo "Fetched project.json for ${APP_SLUG} ($(wc -c < project.json) bytes)"
           NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
           echo "App display name: ${NAME}"
+          # productName becomes the executable filename + CFBundleExecutable.
+          # If it has spaces/accents, codesign on macos-latest mis-classifies
+          # the executable as a resource → it ends up in CodeResources/files2
+          # with a stale hash → "sealed resource is missing or invalid" and
+          # iOS rejects install with "couldn't verify integrity". We force
+          # an ASCII-safe productName from the app slug, and patch
+          # CFBundleDisplayName post-init so iOS still shows the pretty name.
+          SAFE_NAME=$(echo "${APP_SLUG}" | tr -cd 'A-Za-z0-9-' | head -c 40)
+          [ -z "$SAFE_NAME" ] && SAFE_NAME="PropBuilderPlayer"
+          echo "Safe product name (executable filename): ${SAFE_NAME}"
+          echo "DISPLAY_NAME=${NAME}" >> "$GITHUB_ENV"
+          echo "SAFE_PRODUCT_NAME=${SAFE_NAME}" >> "$GITHUB_ENV"
           CONF=../src-tauri/tauri.conf.json
-          jq --arg n "$NAME" '.productName = $n | .app.windows[0].title = $n' "$CONF" > tmp.json && mv tmp.json "$CONF"
+          jq --arg n "$SAFE_NAME" --arg dn "$NAME" \
+            '.productName = $n | .app.windows[0].title = $dn' "$CONF" > tmp.json && mv tmp.json "$CONF"
 
       - name: Generate iOS icons from custom icon (if any)
         working-directory: player/public
@@ -168,6 +181,27 @@ jobs:
           PROFILE_NAME="$PROFILE_NAME" perl -i -pe 'BEGIN { $p = $ENV{PROFILE_NAME}; }
             s|(DEVELOPMENT_TEAM = [^;]+;)|$1\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "$p";\n\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";|g' "$PBXPROJ"
           echo "Patched .pbxproj for manual signing with profile: $PROFILE_NAME"
+
+      - name: Inject CFBundleDisplayName into iOS Info.plist
+        working-directory: player
+        run: |
+          # productName is ASCII-safe (used as executable filename to avoid
+          # codesign confusion), but we want iOS to show the pretty name on
+          # the home screen. CFBundleDisplayName overrides CFBundleName for
+          # display purposes without touching the executable filename.
+          INFO=$(find src-tauri/gen/apple -maxdepth 4 -name Info.plist -type f 2>/dev/null | grep -v "_CodeSignature" | head -1)
+          if [ -z "$INFO" ] || [ ! -f "$INFO" ]; then
+            echo "WARNING: no Info.plist found post-init ; CFBundleDisplayName not patched"
+            find src-tauri/gen/apple -maxdepth 5 -name "*.plist" 2>/dev/null | head -10
+          else
+            echo "Patching $INFO (CFBundleDisplayName=${DISPLAY_NAME})"
+            /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$INFO" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${DISPLAY_NAME}" "$INFO"
+            echo "Final Info.plist (relevant keys):"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleName" "$INFO" 2>&1 | sed 's/^/  CFBundleName: /'
+            /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$INFO" 2>&1 | sed 's/^/  CFBundleDisplayName: /'
+            /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$INFO" 2>&1 | sed 's/^/  CFBundleExecutable: /'
+          fi
 
       - name: Build iOS IPA (Ad Hoc signed)
         working-directory: player
