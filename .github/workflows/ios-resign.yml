@@ -228,6 +228,39 @@ jobs:
           echo "IPA: $IPA ($(du -h "$IPA" | cut -f1))"
           echo "path=$IPA" >> "$GITHUB_OUTPUT"
 
+      - name: Verify IPA codesign + profile
+        id: verify_ipa
+        env:
+          IPA_PATH: ${{ steps.find_ipa.outputs.path }}
+        run: |
+          # Diagnostic step. iOS install will fail with "couldn't verify
+          # integrity" if codesign is broken, so we want to catch that here
+          # rather than pushing a broken IPA to the user's iPhone.
+          TMP=$(mktemp -d)
+          (cd "$TMP" && unzip -q "$GITHUB_WORKSPACE/$IPA_PATH" || ditto -x -k "$GITHUB_WORKSPACE/$IPA_PATH" .)
+          APP_IN_IPA=$(find "$TMP/Payload" -maxdepth 1 -name "*.app" -type d | head -1)
+          if [ -z "$APP_IN_IPA" ]; then
+            echo "ERROR: no .app inside Payload/" >&2
+            ls -la "$TMP/Payload" >&2 || true
+            exit 1
+          fi
+          echo "=== codesign -dvv ==="
+          codesign -dvv "$APP_IN_IPA" 2>&1 || true
+          echo
+          echo "=== codesign --verify --deep --strict ==="
+          if codesign --verify --deep --strict --verbose=2 "$APP_IN_IPA" 2>&1; then
+            echo "OK: codesign verifies."
+          else
+            echo "WARNING: codesign --verify failed. iOS will reject install."
+            # Continue anyway so we get the upload + can inspect on VPS.
+          fi
+          echo
+          echo "=== embedded.mobileprovision (Name + UUID + Devices) ==="
+          security cms -D -i "$APP_IN_IPA/embedded.mobileprovision" 2>/dev/null \
+            | plutil -convert xml1 -o - - \
+            | awk '/<key>(Name|UUID|TeamIdentifier|ExpirationDate)<\/key>/{getline v; print; print v} /ProvisionedDevices/,/<\/array>/'
+          rm -rf "$TMP"
+
       - name: Set up SSH to VPS
         uses: webfactory/ssh-agent@v0.9.0
         with:
