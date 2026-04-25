@@ -395,12 +395,28 @@ jobs:
           CALLBACK_URL: ${{ inputs.callback_url }}
           CALLBACK_SECRET: ${{ secrets.IOS_RESIGN_CALLBACK_SECRET }}
           TOKEN: ${{ inputs.token }}
+          SLUG: ${{ inputs.slug }}
+          APP_SLUG: ${{ inputs.app_slug }}
         run: |
-          curl -sSf -X POST "${CALLBACK_URL}" \
+          # On envoie aussi slug + app_slug : si l'API a perdu l'enrôlement
+          # entre la dispatch et le callback (dedupe par UDID, clear admin),
+          # elle peut quand même promote l'IPA via ces infos plutôt que de
+          # 404 et faire crasher tout le workflow.
+          BODY=$(jq -nc --arg t "$TOKEN" --arg s "$SLUG" --arg a "$APP_SLUG" \
+            '{token:$t, slug:$s, app_slug:$a, status:"ipa_ready"}')
+          HTTP=$(curl -sS -o /tmp/cb.out -w "%{http_code}" -X POST "${CALLBACK_URL}" \
             -H "Content-Type: application/json" \
             -H "x-resign-secret: ${CALLBACK_SECRET}" \
-            -d "{\"token\":\"${TOKEN}\",\"status\":\"ipa_ready\"}"
-          echo "Callback delivered."
+            -d "$BODY")
+          echo "Callback HTTP=$HTTP"
+          cat /tmp/cb.out 2>/dev/null || true
+          echo
+          # 2xx = OK, 200 stale = OK (IPA promote quand même côté API).
+          # On ne fail le job que si c'est un 4xx/5xx hors 200/204.
+          case "$HTTP" in
+            200|204) echo "Callback OK." ;;
+            *) echo "ERROR: callback returned $HTTP" >&2; exit 1 ;;
+          esac
 
       - name: Cleanup keychain
         if: always()
