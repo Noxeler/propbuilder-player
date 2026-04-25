@@ -212,12 +212,13 @@ jobs:
             IPA_DIR="player/src-tauri/gen/apple/build"
             mkdir -p "$IPA_DIR"
             IPA="$IPA_DIR/$(basename "$APP" .app).ipa"
+            IPA_ABS="$(cd "$IPA_DIR" && pwd)/$(basename "$IPA")"
             WORK=$(mktemp -d)
             mkdir -p "$WORK/Payload"
             cp -R "$APP" "$WORK/Payload/"
             # ditto preserves Apple xattrs that zip strips and that iOS
             # checks at install time (otherwise: "couldn't verify integrity").
-            (cd "$WORK" && ditto -c -k --sequesterRsrc --keepParent Payload "$(realpath -m "$IPA")")
+            (cd "$WORK" && ditto -c -k --sequesterRsrc --keepParent Payload "$IPA_ABS")
             rm -rf "$WORK"
           fi
           if [ -z "$IPA" ] || [ ! -f "$IPA" ]; then
