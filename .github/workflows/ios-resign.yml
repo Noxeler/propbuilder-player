@@ -209,6 +209,50 @@ jobs:
             fi
             echo "Source .app: $APP"
             codesign -dvv "$APP" 2>&1 | sed 's/^/  /' || true
+            echo "Verifying ORIGINAL .app (before any modification)…"
+            if codesign --verify --strict --verbose=4 "$APP" 2>&1 | sed 's/^/  /'; then
+              echo "  → ORIGINAL is OK ; re-sign is CAUSING the corruption"
+            else
+              echo "  → ORIGINAL already broken ; xcodebuild produced bad output"
+            fi
+            echo "Listing all files + sizes in original bundle…"
+            find "$APP" -type f -exec ls -la {} \; 2>/dev/null | awk '{print "  ", $5, $NF}' | head -30
+            # Comparing CodeResources hashes vs disk to find which file actually
+            # mismatches. codesign --verify just says "missing or invalid" without
+            # naming the file, so we recompute SHA-256 ourselves.
+            echo "Hashing each sealed file for diff vs CodeResources…"
+            python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
+import os, sys, plistlib, hashlib, base64
+APP = os.environ.get('APP')
+cr_path = os.path.join(APP, '_CodeSignature', 'CodeResources')
+if not os.path.exists(cr_path):
+    print("(no _CodeSignature/CodeResources)")
+    sys.exit(0)
+with open(cr_path, 'rb') as f:
+    data = plistlib.load(f)
+files2 = data.get('files2') or {}
+for fname, info in sorted(files2.items()):
+    hv = info.get('hash2')
+    if isinstance(hv, bytes):
+        expected = hv
+    elif isinstance(hv, dict):
+        b = hv.get('$bytes') or hv.get('bytes')
+        expected = base64.b64decode(b) if b else None
+    else:
+        expected = None
+    fpath = os.path.join(APP, fname)
+    if not os.path.exists(fpath):
+        print(f"MISSING: {fname}")
+        continue
+    h = hashlib.sha256()
+    with open(fpath, 'rb') as f:
+        h.update(f.read())
+    actual = h.digest()
+    if expected and expected != actual:
+        print(f"MISMATCH: {fname} (expected={expected.hex()[:16]}… actual={actual.hex()[:16]}…)")
+    else:
+        print(f"OK: {fname}")
+PY
             # Re-sign deep from scratch. xcodebuild signs the .app, but
             # subsequent tauri/xcodebuild steps (failed exportArchive, asset
             # post-processing) modify nested files, breaking the seal.
