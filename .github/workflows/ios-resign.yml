@@ -209,6 +209,16 @@ jobs:
             fi
             echo "Source .app: $APP"
             codesign -dvv "$APP" 2>&1 | sed 's/^/  /' || true
+            # Re-sign deep before packaging. xcodebuild signs the .app, but
+            # subsequent tauri/xcodebuild steps (failed exportArchive, asset
+            # post-processing) can modify nested files, breaking the seal.
+            # codesign --verify then reports "sealed resource is missing or
+            # invalid" and iOS rejects install with "couldn't verify integrity".
+            echo "Re-signing .app deep with existing entitlements…"
+            CODESIGN_IDENTITY="Apple Distribution: Pierre Loret (${{ env.TEAM_ID }})"
+            codesign --force --deep --sign "$CODESIGN_IDENTITY" \
+              --preserve-metadata=identifier,entitlements,flags \
+              --timestamp=none "$APP" 2>&1 | sed 's/^/  /' || true
             IPA_DIR="player/src-tauri/gen/apple/build"
             mkdir -p "$IPA_DIR"
             IPA="$IPA_DIR/$(basename "$APP" .app).ipa"
