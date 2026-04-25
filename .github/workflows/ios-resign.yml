@@ -203,6 +203,27 @@ jobs:
             /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$INFO" 2>&1 | sed 's/^/  CFBundleExecutable: /'
           fi
 
+      - name: Force get-task-allow=false in entitlements
+        working-directory: player
+        run: |
+          # iOS 16+ exige le "Mode développeur" pour toute app dont les
+          # entitlements signées contiennent get-task-allow=true. Tauri 2
+          # génère un fichier {AppName}_iOS.entitlements qui peut hériter
+          # de la valeur Debug (true) lors de l'archive Release. On force
+          # explicitement get-task-allow=false pour que l'IPA Ad Hoc se
+          # lance directement sans détour par les Réglages iOS.
+          ENT=$(find src-tauri/gen/apple -maxdepth 4 -name "*_iOS.entitlements" -type f 2>/dev/null | head -1)
+          if [ -z "$ENT" ] || [ ! -f "$ENT" ]; then
+            echo "WARNING: no *_iOS.entitlements found after tauri ios init"
+            find src-tauri/gen/apple -maxdepth 5 -name "*.entitlements*" 2>/dev/null | head
+          else
+            echo "Patching entitlements: $ENT"
+            /usr/libexec/PlistBuddy -c "Delete :get-task-allow" "$ENT" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :get-task-allow bool false" "$ENT"
+            echo "Entitlements after patch:"
+            plutil -p "$ENT" | sed 's/^/  /'
+          fi
+
       - name: Build iOS IPA (Ad Hoc signed)
         working-directory: player
         env:
@@ -319,6 +340,11 @@ jobs:
           fi
           echo "=== codesign -dvv ==="
           codesign -dvv "$APP_IN_IPA" 2>&1 || true
+          echo
+          echo "=== Signed entitlements (--xml) ==="
+          codesign -d --entitlements - --xml "$APP_IN_IPA" 2>/dev/null \
+            | plutil -convert xml1 -o - - 2>/dev/null \
+            | grep -E "get-task-allow|aps-environment|com\.apple\." | head -20 || true
           echo
           echo "=== codesign --verify --deep --strict ==="
           if codesign --verify --deep --strict --verbose=4 "$APP_IN_IPA" 2>&1; then
