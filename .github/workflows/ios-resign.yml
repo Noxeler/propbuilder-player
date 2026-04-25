@@ -230,10 +230,29 @@ jobs:
             fi
             echo "Entitlements ($(wc -c < "$ENTITLEMENTS") bytes):"
             cat "$ENTITLEMENTS" | sed 's/^/  /'
+            # Copy the .app to a clean dir BEFORE re-signing. If we sign in
+            # place inside DerivedData, xcodebuild's lingering processes can
+            # touch files (mtimes / xattrs) between sign and verify, breaking
+            # the seal. The clean dir guarantees no concurrent writes.
+            STAGE=$(mktemp -d)
+            cp -R "$APP" "$STAGE/"
+            APP="$STAGE/$(basename "$APP")"
+            echo "Staged .app at: $APP"
+            echo "Listing xattrs before clear…"
+            ls -la@ "$APP" 2>&1 | head -20 | sed 's/^/  /'
+            echo "Clearing extended attributes (recursive)…"
+            # macOS xattrs on individual files inside the bundle (e.g.
+            # com.apple.quarantine, com.apple.ResourceFork, com.apple.metadata)
+            # are NOT sealed by codesign but can make `codesign --verify`
+            # report "sealed resource is invalid" on iOS bundles.
+            xattr -cr "$APP" 2>&1 | sed 's/^/  /' || true
             echo "Listing nested signables before strip…"
             find "$APP" -type d \( -name "*.framework" -o -name "*.dylib" -o -name "*.appex" \) 2>/dev/null | sed 's/^/  /'
             echo "Removing existing _CodeSignature dirs…"
             find "$APP" -type d -name "_CodeSignature" -print -exec rm -rf {} + 2>/dev/null || true
+            # Tauri sometimes leaves an empty `assets/` dir (resources end up
+            # in Assets.car). Empty dirs confuse codesign's resource sealing.
+            find "$APP" -type d -empty -print -delete 2>/dev/null | sed 's/^/  removed empty: /'
             echo "Re-signing nested frameworks/dylibs/appex…"
             while IFS= read -r NESTED; do
               [ -z "$NESTED" ] && continue
@@ -243,9 +262,10 @@ jobs:
             echo "Re-signing top-level .app with entitlements…"
             codesign --force --sign "$CODESIGN_IDENTITY" \
               --entitlements "$ENTITLEMENTS" \
+              --generate-entitlement-der \
               --timestamp=none "$APP" 2>&1 | sed 's/^/  /' || true
-            echo "Verifying re-signed .app (in DerivedData)…"
-            codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/  /' || true
+            echo "Verifying re-signed .app (in stage)…"
+            codesign --verify --deep --strict --verbose=4 "$APP" 2>&1 | sed 's/^/  /' || true
             IPA_DIR="player/src-tauri/gen/apple/build"
             mkdir -p "$IPA_DIR"
             IPA="$IPA_DIR/$(basename "$APP" .app).ipa"
