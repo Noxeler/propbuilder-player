@@ -33,6 +33,7 @@ env:
   VPS_HOST: 217.182.60.238
   VPS_USER: noxel
   DATA_DIR: /var/www/propbuilder-data
+  CALLBACK_BASE: https://propbuilder.noxelstudio.com
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -367,3 +368,44 @@ jobs:
         run: |
           ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-*"
           scp "${EXE_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-windows.exe"
+
+  # ---------------------------------------------------------------------------
+  # NOTIFY — POST callback au backend pour déclencher l'email post-build à
+  # l'utilisateur (download links + instructions PWA iOS).
+  # if: always() pour callback même si certains jobs échouent (le mail liste
+  # les plateformes qui ont réussi).
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify backend
+    runs-on: ubuntu-latest
+    needs: [android, macos, windows]
+    if: always() && inputs.build_id != ''
+    steps:
+      - name: Determine succeeded platforms
+        id: platforms
+        run: |
+          SUCCEEDED=""
+          if [ "${{ needs.android.result }}" = "success" ]; then SUCCEEDED="${SUCCEEDED} android"; fi
+          if [ "${{ needs.macos.result }}"   = "success" ]; then SUCCEEDED="${SUCCEEDED} macos"; fi
+          if [ "${{ needs.windows.result }}" = "success" ]; then SUCCEEDED="${SUCCEEDED} windows"; fi
+          # Trim leading/trailing space
+          SUCCEEDED="$(echo "${SUCCEEDED}" | xargs)"
+          echo "succeeded=${SUCCEEDED}" >> "$GITHUB_OUTPUT"
+          echo "Platforms succeeded: '${SUCCEEDED}'"
+
+      - name: POST callback to backend
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          PLATFORMS: ${{ steps.platforms.outputs.succeeded }}
+          SECRET: ${{ secrets.BUILD_CALLBACK_SECRET }}
+        run: |
+          if [ -z "${SECRET}" ]; then
+            echo "BUILD_CALLBACK_SECRET secret not set on the repo — skipping notify."
+            exit 0
+          fi
+          curl -sS -X POST \
+            "${{ env.CALLBACK_BASE }}/api/admin/build/notify-callback/${BUILD_ID}" \
+            -H "Content-Type: application/json" \
+            -H "x-callback-secret: ${SECRET}" \
+            -d "{\"platforms\":\"${PLATFORMS}\"}" \
+            -w "\nHTTP %{http_code}\n"
