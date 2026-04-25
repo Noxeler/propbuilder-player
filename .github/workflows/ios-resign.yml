@@ -151,55 +151,80 @@ jobs:
           APPLE_DEVELOPMENT_TEAM: ${{ env.TEAM_ID }}
         run: npm run tauri ios init
 
+      - name: Patch .pbxproj for manual signing
+        working-directory: player
+        run: |
+          # Tauri 2 generates the iOS xcodeproj with CODE_SIGN_STYLE=Automatic,
+          # which requires an Apple ID configured in Xcode (impossible on a
+          # GHA runner). We force Manual signing + inject our profile name +
+          # Apple Distribution identity so xcodebuild can sign without an
+          # Apple ID. Same patch as scripts/build-player-local-ios.sh.
+          PBXPROJ=src-tauri/gen/apple/player.xcodeproj/project.pbxproj
+          if [ ! -f "$PBXPROJ" ]; then
+            echo "ERROR: .pbxproj not found after tauri ios init" >&2
+            exit 1
+          fi
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PBXPROJ"
+          PROFILE_NAME="$PROFILE_NAME" perl -i -pe 'BEGIN { $p = $ENV{PROFILE_NAME}; }
+            s|(DEVELOPMENT_TEAM = [^;]+;)|$1\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "$p";\n\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";|g' "$PBXPROJ"
+          echo "Patched .pbxproj for manual signing with profile: $PROFILE_NAME"
+
       - name: Build iOS IPA (Ad Hoc signed)
         working-directory: player
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ env.TEAM_ID }}
         run: |
-          # Tauri delegates to xcodebuild. We need the export options to use release-testing signing
-          # with our specific provisioning profile.
-          BUNDLE_ID="${{ inputs.bundle_id }}"
-          cat > /tmp/ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>release-testing</string>
-            <key>teamID</key>
-            <string>${TEAM_ID}</string>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>signingCertificate</key>
-            <string>Apple Distribution</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${BUNDLE_ID}</key>
-              <string>${PROFILE_NAME}</string>
-            </dict>
-            <key>compileBitcode</key>
-            <false/>
-            <key>thinning</key>
-            <string>&lt;none&gt;</string>
-          </dict>
-          </plist>
-          EOF
+          # Tauri 2's `tauri ios build` does archive + exportArchive. The
+          # export step plants a generated ExportOptions.plist with automatic
+          # signing (which CLI doesn't let us override) and dies with
+          # "No Accounts". We tolerate that — the prior `xcodebuild build`
+          # step has already produced a signed .app via our manual-signing
+          # patch, and we package the IPA ourselves below.
+          set +e
           npm run tauri ios build -- --export-method release-testing
+          TAURI_EXIT=$?
+          set -e
+          if [ $TAURI_EXIT -ne 0 ]; then
+            echo "tauri ios build exit=$TAURI_EXIT (likely export step). Will fall back to manual IPA packaging."
+          fi
 
-      - name: Locate IPA
+      - name: Locate or package IPA
         id: find_ipa
         run: |
-          IPA=$(find player/src-tauri/gen/apple/build -name "*.ipa" | head -1)
+          IPA=$(find player/src-tauri/gen/apple/build -name "*.ipa" 2>/dev/null | head -1)
           if [ -z "$IPA" ]; then
-            echo "No IPA produced. Searching wider..."
-            IPA=$(find player -name "*.ipa" | head -1)
+            IPA=$(find player -name "*.ipa" 2>/dev/null | head -1)
           fi
           if [ -z "$IPA" ]; then
+            echo "No IPA from Tauri ; packaging manually from signed .app…"
+            APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" \
+              -path "*release-iphoneos*" -name "*.app" -type d 2>/dev/null \
+              | grep -v "\.dSYM" \
+              | xargs -I{} stat -f "%m %N" {} 2>/dev/null \
+              | sort -nr | head -1 | cut -d' ' -f2-)
+            if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+              echo "ERROR: no signed .app found in DerivedData" >&2
+              find "$HOME/Library/Developer/Xcode/DerivedData" -path "*release-iphoneos*" -name "*.app" 2>/dev/null | head >&2 || true
+              exit 1
+            fi
+            echo "Source .app: $APP"
+            codesign -dvv "$APP" 2>&1 | sed 's/^/  /' || true
+            IPA_DIR="player/src-tauri/gen/apple/build"
+            mkdir -p "$IPA_DIR"
+            IPA="$IPA_DIR/$(basename "$APP" .app).ipa"
+            WORK=$(mktemp -d)
+            mkdir -p "$WORK/Payload"
+            cp -R "$APP" "$WORK/Payload/"
+            # ditto preserves Apple xattrs that zip strips and that iOS
+            # checks at install time (otherwise: "couldn't verify integrity").
+            (cd "$WORK" && ditto -c -k --sequesterRsrc --keepParent Payload "$(realpath -m "$IPA")")
+            rm -rf "$WORK"
+          fi
+          if [ -z "$IPA" ] || [ ! -f "$IPA" ]; then
             echo "Build did not produce an IPA"
-            find player -name "*.ipa" -o -name "*.app" || true
             exit 1
           fi
-          echo "Found IPA: $IPA ($(du -h "$IPA" | cut -f1))"
+          echo "IPA: $IPA ($(du -h "$IPA" | cut -f1))"
           echo "path=$IPA" >> "$GITHUB_OUTPUT"
 
       - name: Set up SSH to VPS
