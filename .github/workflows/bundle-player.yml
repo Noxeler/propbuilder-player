@@ -1,6 +1,6 @@
 name: Bundle Player
 
-run-name: "Bundle ${{ inputs.platforms }} [${{ inputs.build_id }}]"
+run-name: "Bundle ${{ inputs.platforms }} — ${{ inputs.slug }}/${{ inputs.app_slug }} [${{ inputs.build_id }}]"
 
 on:
   workflow_dispatch:
