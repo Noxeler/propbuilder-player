@@ -101,33 +101,11 @@ export function PreviewElement({
         const hasTextAction =
           !!element.onClickAction || !!element.targetPageId
         return (
-          <Text
-            x={element.x}
-            y={element.y}
-            width={element.width}
-            height={element.height}
-            rotation={element.rotation}
-            opacity={element.opacity}
-            text={textContent}
-            fontSize={element.fontSize || 32}
-            fontFamily={element.fontFamily || 'Arial'}
-            fontStyle={konvaFontStyle(element)}
-            textDecoration={konvaTextDecoration(element)}
-            fill={element.color || '#000000'}
-            align={element.textAlign ?? 'left'}
-            listening={hasTextAction}
-            // perfectDrawEnabled=false + shadowForStrokeEnabled=false
-            // sont les flags officiels Konva qui éliminent les pixels
-            // orphelins autour des glyphes quand on a une shadow. Le
-            // 1er coupe l'optimisation 2-passes qui rasterise le glyph
-            // 2x à des positions sub-pixel (visible quand le Stage est
-            // scaled à un facteur fractionnaire, typique côté mobile).
-            // Le 2e évite que l'ombre soit appliquée 2 fois (une pour
-            // fill, une pour stroke) → moitié du flicker en moins quand
-            // un redraw 60fps tourne (swipe knob, GIF, caret livetext).
-            perfectDrawEnabled={false}
-            shadowForStrokeEnabled={false}
-            {...shadowKonvaProps}
+          <CachedText
+            element={element}
+            textContent={textContent}
+            hasTextAction={hasTextAction}
+            shadowProps={shadowKonvaProps}
           />
         )
       }
@@ -315,6 +293,90 @@ export function PreviewElement({
       )}
       {inner}
     </Group>
+  )
+}
+
+// Text statique avec cache bitmap. Même problématique que LiveTextPreview
+// et SwipeKnob : Konva rasterise les glyphes à chaque batchDraw, et avec
+// Stage.scaleX fractionnaire (canvasScale ≠ entier), les pixels d'anti-
+// aliasing tombent à des positions sub-pixel → artefacts visibles
+// (surtout sur les gros fontSize comme l'horloge 9:45 en 101pt). En
+// cachant le Text en bitmap au layout-effect (avant le 1er paint), le
+// rendu est calculé UNE FOIS proprement, puis Konva ne fait que
+// translater la bitmap au lieu de re-rasteriser à chaque tick. Re-cache
+// si le contenu ou les styles changent (ex: param "Heure" édité dans
+// l'aperçu partagé). Pour les textes sans shadow on cache aussi — le
+// gain visuel sur les gros glyphes blancs sur fond contrasté est net.
+function CachedText({
+  element,
+  textContent,
+  hasTextAction,
+  shadowProps,
+}: {
+  element: CanvasElement
+  textContent: string
+  hasTextAction: boolean
+  shadowProps: Record<string, unknown>
+}) {
+  const textRef = useRef<Konva.Text>(null)
+  useLayoutEffect(() => {
+    const node = textRef.current
+    if (!node) return
+    // Padding cache : doit englober la shadow + une marge pour
+    // l'antialiasing. Si pas de shadow, marge minimale suffit.
+    const blur = Number(shadowProps?.shadowBlur ?? 0)
+    const offX = Math.abs(Number(shadowProps?.shadowOffsetX ?? 0))
+    const offY = Math.abs(Number(shadowProps?.shadowOffsetY ?? 0))
+    const pad = Math.ceil(blur + Math.max(offX, offY) + 8)
+    try {
+      node.cache({
+        x: -pad,
+        y: -pad,
+        width: element.width + pad * 2,
+        height: element.height + pad * 2,
+      })
+      node.getLayer()?.batchDraw()
+    } catch {
+      /* dims invalides → rendu live sans cache */
+    }
+    return () => {
+      try {
+        node.clearCache()
+      } catch {
+        /* node déjà unmount */
+      }
+    }
+  }, [
+    textContent,
+    element.fontSize,
+    element.fontFamily,
+    element.color,
+    element.width,
+    element.height,
+    element.textAlign,
+    shadowProps,
+  ])
+  return (
+    <Text
+      ref={textRef}
+      x={element.x}
+      y={element.y}
+      width={element.width}
+      height={element.height}
+      rotation={element.rotation}
+      opacity={element.opacity}
+      text={textContent}
+      fontSize={element.fontSize || 32}
+      fontFamily={element.fontFamily || 'Arial'}
+      fontStyle={konvaFontStyle(element)}
+      textDecoration={konvaTextDecoration(element)}
+      fill={element.color || '#000000'}
+      align={element.textAlign ?? 'left'}
+      listening={hasTextAction}
+      perfectDrawEnabled={false}
+      shadowForStrokeEnabled={false}
+      {...shadowProps}
+    />
   )
 }
 
