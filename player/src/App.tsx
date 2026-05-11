@@ -333,17 +333,34 @@ function PlayerShell({
     return () => window.removeEventListener('resize', h)
   }, [])
 
-  // Geste 3 doigts × 3 = retour menu (utile en mode playing sur touchscreen)
+  // Geste 3 doigts × 3 taps = retour menu (utile en mode playing sur
+  // touchscreen).
+  //
+  // Détection robuste : fenêtre 150 ms pour reconnaître 3 doigts décalés
+  // comme un seul tap collectif (un `if (e.touches.length === 3)` strict
+  // rate quand les doigts touchent à 10-30 ms d'écart, ce qui est le cas
+  // naturel quand l'utilisateur pose ses 3 doigts). Garde-fou de 120 ms
+  // entre 2 taps collectifs pour ne pas compter 2 doigts arrivés en
+  // retard comme un 2e tap.
   useEffect(() => {
+    let recentDigitAdds: number[] = []
     let tapTimes: number[] = []
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length !== 3) return
       const now = Date.now()
-      tapTimes = tapTimes.filter((t) => now - t < 1500)
-      tapTimes.push(now)
-      if (tapTimes.length >= 3) {
-        tapTimes = []
-        setMode('menu')
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        recentDigitAdds.push(now)
+      }
+      recentDigitAdds = recentDigitAdds.filter((t) => now - t < 150)
+      if (recentDigitAdds.length >= 3) {
+        recentDigitAdds = []
+        const lastTap = tapTimes[tapTimes.length - 1] ?? 0
+        if (now - lastTap < 120) return
+        tapTimes = tapTimes.filter((t) => now - t < 2000)
+        tapTimes.push(now)
+        if (tapTimes.length >= 3) {
+          tapTimes = []
+          setMode('menu')
+        }
       }
     }
     window.addEventListener('touchstart', onTouchStart)
