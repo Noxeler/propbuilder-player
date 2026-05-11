@@ -1092,9 +1092,16 @@ function PlayerShell({
       const tick = (now: number) => {
         const t = Math.min(1, (now - start) / durationMs)
         const eased = 1 - Math.pow(1 - t, 3)
+        // Round à l'entier : la position du knob (et donc toute la
+        // page slidée) est utilisée comme x/y de Group Konva sans
+        // canvasScale appliqué à ce niveau — le scale est sur le Stage.
+        // En ne passant que des entiers, on évite que Konva voit une
+        // valeur fractionnaire qui se traduit en position sub-pixel
+        // post-scale. Moins de re-rasterisation des textes ombrés
+        // adjacents pendant le drag.
         setSwipeOffset({
-          x: fromX + (toX - fromX) * eased,
-          y: fromY + (toY - fromY) * eased,
+          x: Math.round(fromX + (toX - fromX) * eased),
+          y: Math.round(fromY + (toY - fromY) * eased),
         })
         if (t < 1) {
           swipeAnimRef.current = requestAnimationFrame(tick)
@@ -1196,7 +1203,10 @@ function PlayerShell({
           if (primary === 'up') canvasY = Math.max(canvasY, -hMagY)
         }
       }
-      setSwipeOffset({ x: canvasX, y: canvasY })
+      // Round à l'entier : cf. commentaire dans animateTo — évite les
+      // positions sub-pixel qui font flicker les textes ombrés adjacents
+      // pendant le drag (re-rasterisation 60fps à des coords fractionnaires).
+      setSwipeOffset({ x: Math.round(canvasX), y: Math.round(canvasY) })
     }
     const detectWinning = (
       dirs: ('left' | 'right' | 'up' | 'down')[],
