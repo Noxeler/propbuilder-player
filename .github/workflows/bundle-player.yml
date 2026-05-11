@@ -203,6 +203,15 @@ jobs:
             override fun onCreate(savedInstanceState: Bundle?) {
               enableEdgeToEdge()
               super.onCreate(savedInstanceState)
+              applyImmersive()
+            }
+
+            override fun onWindowFocusChanged(hasFocus: Boolean) {
+              super.onWindowFocusChanged(hasFocus)
+              if (hasFocus) applyImmersive()
+            }
+
+            private fun applyImmersive() {
               WindowCompat.setDecorFitsSystemWindows(window, false)
               val controller = WindowInsetsControllerCompat(window, window.decorView)
               controller.hide(WindowInsetsCompat.Type.systemBars())
