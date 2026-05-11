@@ -2102,14 +2102,22 @@ function PlayerShell({
                   <IosToast
                     key={t.data.id}
                     toast={t.data}
-                    // Tap sur la carte : ferme ce toast et appelle son
-                    // onTap si défini (composé via buildToastOnTap depuis
-                    // l'élément source).
-                    onClick={() => {
-                      const f = t.onTap
-                      dismissToast(t.data.id)
-                      f?.()
-                    }}
+                    // Tap sur la carte : si l'auteur a configuré une
+                    // action ou une navigation (onTap), le tap ferme la
+                    // notif ET déclenche cette action. Si aucune action
+                    // n'est définie, le tap est ignoré — la notif reste
+                    // visible jusqu'à durationMs (ou jamais si infinie).
+                    // Évite que l'utilisateur dismisse par accident une
+                    // notif "passive" en touchant l'écran.
+                    onClick={
+                      t.onTap
+                        ? () => {
+                            const f = t.onTap!
+                            dismissToast(t.data.id)
+                            f()
+                          }
+                        : undefined
+                    }
                     durationMs={t.durationMs}
                     onDone={() => dismissToast(t.data.id)}
                   />

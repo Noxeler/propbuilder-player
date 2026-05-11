@@ -103,9 +103,11 @@ export function IosToast({
         transition:
           'transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease-out',
         zIndex: 30,
-        // Mode infini : la carte doit être tappable pour pouvoir être
-        // fermée — sinon elle resterait à l'écran sans recours.
-        pointerEvents: toast.infinite ? 'auto' : 'none',
+        // Wrapper transparent aux pointer events sauf si onClick défini —
+        // évite qu'une notif décorative (sans action attachée) intercepte
+        // les taps destinés aux hotspots/livetexts en dessous, et évite
+        // un dismiss accidentel au touch.
+        pointerEvents: onClick ? 'auto' : 'none',
       }
     : {
         transform: baseTransform,
@@ -127,27 +129,20 @@ export function IosToast({
           : 'w-[min(320px,75%)]'
       } bg-white/50 backdrop-blur-md rounded-2xl shadow-[0_6px_18px_rgba(0,0,0,0.10)] px-3 py-2.5 flex items-center gap-3`
 
-  // Le wrapper a pointerEvents='none' (sauf si positioned avec wrapperStyle
-  // explicite). On remet 'auto' sur la carte uniquement quand onClick est
-  // fourni — sans ça la carte intercepterait les taps même quand non
-  // cliquable, masquant les hotspots dessous.
+  // Tap = trigger onClick (qui inclut le dismiss côté parent). Si pas
+  // d'onClick, le tap est un no-op et la notif reste visible — c'est
+  // l'auteur qui décide si la notif est interactive en lui attachant
+  // une action (onClickAction ou targetPageId sur l'élément source).
+  // Ça vaut aussi pour les infinies : sans action, elles persistent
+  // jusqu'à ce qu'un trigger externe les fasse disparaître.
   const handleCardClick = (e: React.MouseEvent) => {
-    // Mode infini : tap = dismiss forcé (en plus de l'onClick éventuel
-    // attaché par le parent, type navigate).
-    if (toast.infinite) {
-      e.stopPropagation()
-      onClick?.()
-      onDoneRef.current?.()
-      return
-    }
     if (!onClick) return
     e.stopPropagation()
     onClick()
   }
-  const cardStyle: React.CSSProperties =
-    onClick || toast.infinite
-      ? { pointerEvents: 'auto', cursor: 'pointer' }
-      : {}
+  const cardStyle: React.CSSProperties = onClick
+    ? { pointerEvents: 'auto', cursor: 'pointer' }
+    : {}
 
   return (
     <div className={wrapperClass} style={wrapperStyle}>
