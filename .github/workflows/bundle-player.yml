@@ -100,20 +100,52 @@ jobs:
             '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
             "$CONF" > tmp.json && mv tmp.json "$CONF"
 
-      - name: Generate icons from custom icon (if any)
+      - name: Install librsvg (for SVG fallback icon)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin imagemagick
+
+      - name: Generate icons (from iconDataUrl, else fallback from app name)
         working-directory: player/public
         run: |
           ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' project.json)
-          if [ -z "$ICON_DATA" ]; then
-            echo "No custom icon, using default."
-            exit 0
+          NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
+          mkdir -p /tmp/icongen
+          SRC=/tmp/icongen/src.png
+
+          if [ -n "$ICON_DATA" ]; then
+            echo "→ Décodage iconDataUrl pour Android…"
+            if ! echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > "$SRC" 2>/dev/null; then
+              echo "  ⚠ base64 illisible — fallback SVG."
+              ICON_DATA=""
+            fi
           fi
-          echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > /tmp/src.png
-          convert /tmp/src.png -resize 512x512 ../src-tauri/icons/icon.png
-          convert /tmp/src.png -resize 128x128 ../src-tauri/icons/128x128.png
-          convert /tmp/src.png -resize 256x256 ../src-tauri/icons/128x128@2x.png
-          convert /tmp/src.png -resize 32x32 ../src-tauri/icons/32x32.png
-          echo "Custom icon applied ($(du -h /tmp/src.png | cut -f1))"
+
+          if [ -z "$ICON_DATA" ]; then
+            echo "→ Pas d'iconDataUrl — génération fallback depuis « $NAME »"
+            INITIALS=$(LC_ALL=fr_FR.UTF-8 awk '{n=0; for (i=1;i<=NF;i++) {c=substr($i,1,1); if (c ~ /[A-Za-zÀ-ÿ]/) {out=out toupper(c); n++; if (n==2) break}} print out}' <<< "$NAME")
+            [ -z "$INITIALS" ] && INITIALS="A"
+            cat > /tmp/icongen/src.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+            <defs>
+              <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#3f3f46"/>
+                <stop offset="100%" stop-color="#09090b"/>
+              </linearGradient>
+            </defs>
+            <rect width="1024" height="1024" rx="225" fill="url(#bg)"/>
+            <text x="512" y="650" text-anchor="middle"
+                  font-family="DejaVu Sans, sans-serif"
+                  font-size="460" font-weight="600" fill="#fafafa">${INITIALS}</text>
+          </svg>
+          EOF
+            rsvg-convert -w 1024 -h 1024 /tmp/icongen/src.svg -o "$SRC"
+            echo "  ✓ Initiales « $INITIALS »"
+          fi
+
+          convert "$SRC" -resize 512x512 ../src-tauri/icons/icon.png
+          convert "$SRC" -resize 128x128 ../src-tauri/icons/128x128.png
+          convert "$SRC" -resize 256x256 ../src-tauri/icons/128x128@2x.png
+          convert "$SRC" -resize 32x32 ../src-tauri/icons/32x32.png
+          echo "Icônes Tauri remplacées ($(du -h "$SRC" | cut -f1))"
 
       - name: Init Tauri Android project
         working-directory: player
