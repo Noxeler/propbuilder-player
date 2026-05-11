@@ -157,14 +157,19 @@ export async function loadAnimatedImage(
   src: string,
   blobHint?: Blob
 ): Promise<LoadedAnimated> {
-  // Fast-path : si la source ne peut PAS être un GIF animé (data URL
-  // non-GIF, ou URL avec extension claire non-GIF), on saute le détour
-  // fetch+blob et on file direct sur <img src>. Sous Tauri Android,
-  // fetch() peut silencieusement échouer pour des data URLs longs ou
-  // pour le scheme custom Tauri là où <img src> accepte sans broncher
-  // — cette voie évite ces faux négatifs (image jamais chargée, donc
-  // wallpaper invisible côté natif).
-  if (!blobHint && !isPotentialGif(src)) {
+  // Stratégie de chargement par taille/type :
+  //  - Petite source (data URL < 100 KB) ET pas un GIF : voie directe
+  //    <img src=...>. Le plus rapide, marche partout.
+  //  - Gros data URL (≥ 100 KB) OU GIF potentiel : on fetch en blob.
+  //    Pour les gros data URLs, le <img src=data:...> casse silencieux
+  //    sur Tauri Android WebView (limite interne ~quelques 100 KB selon
+  //    le device) → on convertit en URL.createObjectURL qui est un
+  //    pointeur court vers le blob en mémoire, accepté sans souci.
+  //    Pour les GIFs, on a besoin du blob pour décoder en JS via gifuct.
+  const isLikelyGif = isPotentialGif(src)
+  const isLargeDataUrl = src.startsWith('data:') && src.length > 100_000
+
+  if (!blobHint && !isLikelyGif && !isLargeDataUrl) {
     return loadAsImageElement(src)
   }
 
@@ -174,7 +179,9 @@ export async function loadAnimatedImage(
       const res = await fetch(src)
       blob = await res.blob()
     } catch {
-      // fetch a échoué (Tauri quirk, CORS, etc.) — fallback <img> direct
+      // fetch a échoué (Tauri quirk, CORS, etc.) — fallback <img> direct.
+      // Si c'est un gros data URL et que <img> aussi échoue, on aura
+      // une erreur claire à ce moment-là (image cassée affichée).
       return loadAsImageElement(src)
     }
   }
@@ -195,15 +202,37 @@ export async function loadAnimatedImage(
           detach: player.stop,
         }
       }
-      // GIF mono-frame → tombe sur l'<img> normal
+      // GIF mono-frame → tombe sur l'<img> normal via blob URL
     } catch (err) {
       console.warn('[animatedImage] gif decode failed, fallback to <img>', err)
     }
   }
 
-  // Fallback : HTMLImageElement classique (PNG, JPEG, WebP statique, GIF
-  // mono-frame, ou GIF qu'on n'a pas su parser).
-  return loadAsImageElement(src)
+  // Non-GIF (ou GIF qu'on n'a pas su décoder) : on passe par un Blob
+  // URL plutôt que de re-coller le data URL original. Évite la size
+  // limit silencieuse de <img src=data:...> sur Tauri Android pour les
+  // wallpapers en JPEG/PNG inline 1 MB+.
+  const objUrl = URL.createObjectURL(blob)
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image()
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error('Image load failed'))
+      el.src = objUrl
+    })
+    return {
+      source: img,
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+      // Revoke le blob URL au unmount pour libérer la mémoire. Sans ça,
+      // 50 wallpapers chargés × 1 MB de blob = 50 MB en mémoire vive
+      // qui ne sont jamais GC, même quand le user navigue ailleurs.
+      detach: () => URL.revokeObjectURL(objUrl),
+    }
+  } catch (err) {
+    URL.revokeObjectURL(objUrl)
+    throw err
+  }
 }
 
 function isPotentialGif(src: string): boolean {
