@@ -19,7 +19,7 @@ on:
         type: string
         default: ''
       platforms:
-        description: 'Comma-separated list of targets: android,macos,windows'
+        description: 'Comma-separated targets: android,android-twa,macos,windows'
         required: false
         type: string
         default: 'android,macos,windows'
@@ -258,6 +258,201 @@ jobs:
         run: |
           # Wipe ONLY le player-android.apk précédent — pas tout le player-*
           # (sinon un build Android écraserait un .dmg/.exe issus d'un autre job).
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
+          rsync -avz "${APK_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
+
+  # ---------------------------------------------------------------------------
+  # ANDROID TWA — Trusted Web Activity. APK léger (~500 KB) qui wrap le
+  # Chrome installé sur le device au lieu d'embarquer une WebView. Beaucoup
+  # plus rapide sur vieux Android car Chrome est toujours à jour via Play
+  # Store. Pas besoin de Rust/NDK comme pour Tauri — juste Bubblewrap CLI
+  # qui prend le manifest URL exposé par notre API et émet un APK signé.
+  # ---------------------------------------------------------------------------
+  android-twa:
+    if: contains(inputs.platforms, 'android-twa')
+    name: Android TWA APK (lightweight)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Bubblewrap CLI
+        run: npm install -g @bubblewrap/cli@latest
+
+      - name: Restore keystore from secret
+        env:
+          KEYSTORE_B64: ${{ secrets.TWA_KEYSTORE_BASE64 }}
+        run: |
+          # Le keystore est stocké en base64 dans le secret GHA pour qu'il
+          # passe le YAML sans soucis d'encodage binaire. On le décode dans
+          # un fichier local utilisé ensuite par bubblewrap pour signer.
+          if [ -z "${KEYSTORE_B64}" ]; then
+            echo "ERROR: secret TWA_KEYSTORE_BASE64 absent — cf README pour le générer." >&2
+            exit 1
+          fi
+          mkdir -p .twa
+          echo "${KEYSTORE_B64}" | base64 -d > .twa/twa.keystore
+          echo "  ✓ keystore restauré ($(stat -c%s .twa/twa.keystore) bytes)"
+
+      - name: Extract SHA256 fingerprint
+        id: fingerprint
+        env:
+          KEY_PASS: ${{ secrets.TWA_KEYSTORE_PASS }}
+        run: |
+          if [ -z "${KEY_PASS}" ]; then
+            echo "ERROR: secret TWA_KEYSTORE_PASS absent." >&2
+            exit 1
+          fi
+          # Force en_US locale pour avoir "SHA256:" au lieu de la trad locale.
+          KEYTOOL_RAW=$(keytool -J-Duser.language=en -J-Duser.country=US \
+            -list -v -keystore .twa/twa.keystore -alias android \
+            -storepass "${KEY_PASS}" 2>&1)
+          SHA256=$(echo "${KEYTOOL_RAW}" \
+            | grep -iE 'SHA-?256' | head -1 \
+            | grep -oE '([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}' | head -1 \
+            | tr 'a-f' 'A-F')
+          if [ -z "${SHA256}" ]; then
+            echo "ERROR: fingerprint introuvable. Keytool brut :" >&2
+            echo "${KEYTOOL_RAW}" | head -30 >&2
+            exit 1
+          fi
+          echo "fingerprint=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "  ✓ SHA256 = ${SHA256}"
+
+      - name: Compute package name + manifest URL
+        id: meta
+        env:
+          SLUG: ${{ inputs.slug }}
+          APP_SLUG: ${{ inputs.app_slug }}
+        run: |
+          # Slug Android package : pas de tirets, lowercase, segments
+          # alphanumériques + underscores. On nettoie le couple slug/app
+          # comme le script local pour produire la même clé entre les
+          # deux pipelines.
+          SAFE=$(echo "${SLUG}-${APP_SLUG}" \
+            | tr -c '[:alnum:]' '_' \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/_*$//' \
+            | sed 's/__*/_/g')
+          PKG="com.noxelstudio.propbuilder.${SAFE}"
+          echo "package_name=${PKG}" >> "$GITHUB_OUTPUT"
+          echo "manifest_url=${{ env.CALLBACK_BASE }}/api/public/projects/${SLUG}/apps/${APP_SLUG}/manifest.webmanifest" >> "$GITHUB_OUTPUT"
+          echo "  packageName = ${PKG}"
+
+      - name: Register fingerprint with API (assetlinks.json)
+        env:
+          PKG: ${{ steps.meta.outputs.package_name }}
+          FP: ${{ steps.fingerprint.outputs.fingerprint }}
+          CB_SECRET: ${{ secrets.BUILD_CALLBACK_SECRET }}
+        run: |
+          if [ -z "${CB_SECRET}" ]; then
+            echo "  ⚠ BUILD_CALLBACK_SECRET secret absent — fingerprint non enregistré, le TWA aura la barre Chrome visible."
+            exit 0
+          fi
+          curl -sS -X POST "${{ env.CALLBACK_BASE }}/api/admin/build/register-twa-fingerprint" \
+            -H "Content-Type: application/json" \
+            -H "x-callback-secret: ${CB_SECRET}" \
+            -d "{\"package_name\":\"${PKG}\",\"sha256_fingerprint\":\"${FP}\"}" \
+            -w "\nHTTP %{http_code}\n"
+
+      - name: Pre-fill twa-manifest.json
+        env:
+          PKG: ${{ steps.meta.outputs.package_name }}
+          MANIFEST_URL: ${{ steps.meta.outputs.manifest_url }}
+          SLUG: ${{ inputs.slug }}
+          APP_SLUG: ${{ inputs.app_slug }}
+        run: |
+          KEY_ABS="$(pwd)/.twa/twa.keystore"
+          # Pré-remplit la config Bubblewrap. Le `bubblewrap update`
+          # ci-dessous régénère un projet Android complet à partir de ça
+          # sans interaction.
+          cat > twa-manifest.json <<EOF
+          {
+            "packageId": "${PKG}",
+            "host": "propbuilder.noxelstudio.com",
+            "name": "PropBuilder Player",
+            "launcherName": "PropBuilder",
+            "themeColor": "#000000",
+            "navigationColor": "#000000",
+            "backgroundColor": "#000000",
+            "enableNotifications": false,
+            "startUrl": "/p/${SLUG}/${APP_SLUG}",
+            "iconUrl": "${{ env.CALLBACK_BASE }}/api/public/projects/${SLUG}/apps/${APP_SLUG}/icon-512.png",
+            "maskableIconUrl": "${{ env.CALLBACK_BASE }}/api/public/projects/${SLUG}/apps/${APP_SLUG}/icon-512.png",
+            "appVersionName": "1.0.0",
+            "appVersionCode": ${{ github.run_number }},
+            "signingKey": { "path": "${KEY_ABS}", "alias": "android" },
+            "splashScreenFadeOutDuration": 300,
+            "orientation": "portrait",
+            "fallbackType": "customtabs",
+            "features": {},
+            "alphaDependencies": { "enabled": false },
+            "enableSiteSettingsShortcut": false,
+            "isChromeOSOnly": false,
+            "isMetaQuest": false,
+            "fullScopeUrl": "${{ env.CALLBACK_BASE }}/p/${SLUG}/${APP_SLUG}"
+          }
+          EOF
+
+      - name: Bubblewrap init/update + build
+        env:
+          KEY_PASS: ${{ secrets.TWA_KEYSTORE_PASS }}
+          MANIFEST_URL: ${{ steps.meta.outputs.manifest_url }}
+        run: |
+          # 1ère étape : update (si projet déjà bootstrapped) sinon init.
+          bubblewrap update --skipVersionUpgrade 2>&1 || \
+            bubblewrap init --manifest="${MANIFEST_URL}"
+          # 2ème étape : build signé avec le keystore restauré.
+          # Bubblewrap demande les passes via prompt — on les pipe via
+          # KEYSTORE_PASSWORD/KEY_PASSWORD env vars qu'il sait lire.
+          export KEYSTORE_PASSWORD="${KEY_PASS}"
+          export KEY_PASSWORD="${KEY_PASS}"
+          bubblewrap build --skipPwaValidation
+
+      - name: Locate signed APK
+        id: find_apk
+        run: |
+          APK=$(find . -name "*-signed.apk" 2>/dev/null | head -1)
+          [ -z "$APK" ] && APK=$(find . -name "app-release-signed.apk" 2>/dev/null | head -1)
+          [ -z "$APK" ] && APK=$(find . -name "*.apk" 2>/dev/null | grep -E 'release|signed' | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: aucune APK signée trouvée." >&2
+            find . -name "*.apk" 2>/dev/null | head -20 >&2 || true
+            exit 1
+          fi
+          echo "path=${APK}" >> "$GITHUB_OUTPUT"
+          echo "  ✓ APK : ${APK} ($(du -h "${APK}" | cut -f1))"
+
+      - name: Set up SSH to VPS
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload APK to VPS
+        env:
+          APK_PATH: ${{ steps.find_apk.outputs.path }}
+          SLUG: ${{ inputs.slug }}
+          APP_SLUG: ${{ inputs.app_slug }}
+        run: |
+          # Même slot que le Tauri APK — l'auteur choisit Tauri OU TWA pour
+          # une app donnée, pas les deux en parallèle (un seul player-android.apk
+          # téléchargé par l'aperçu public à la fois).
           ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
           rsync -avz "${APK_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
 
@@ -660,14 +855,20 @@ jobs:
   notify:
     name: Notify backend
     runs-on: ubuntu-latest
-    needs: [android, macos, windows]
+    needs: [android, android-twa, macos, windows]
     if: always() && inputs.build_id != ''
     steps:
       - name: Determine succeeded platforms
         id: platforms
         run: |
           SUCCEEDED=""
-          if [ "${{ needs.android.result }}" = "success" ]; then SUCCEEDED="${SUCCEEDED} android"; fi
+          # Tauri APK et TWA APK partagent le même slot 'android' côté
+          # publish (un seul player-android.apk par app). Si l'un OU
+          # l'autre a réussi, on déclare android comme publié.
+          if [ "${{ needs.android.result }}" = "success" ] \
+             || [ "${{ needs.android-twa.result }}" = "success" ]; then
+            SUCCEEDED="${SUCCEEDED} android"
+          fi
           if [ "${{ needs.macos.result }}"   = "success" ]; then SUCCEEDED="${SUCCEEDED} macos"; fi
           if [ "${{ needs.windows.result }}" = "success" ]; then SUCCEEDED="${SUCCEEDED} windows"; fi
           # Trim leading/trailing space
