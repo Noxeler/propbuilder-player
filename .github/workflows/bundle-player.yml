@@ -155,7 +155,9 @@ jobs:
           SLUG: ${{ inputs.slug }}
           APP_SLUG: ${{ inputs.app_slug }}
         run: |
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-*"
+          # Wipe ONLY le player-android.apk précédent — pas tout le player-*
+          # (sinon un build Android écraserait un .dmg/.exe issus d'un autre job).
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
           rsync -avz "${APK_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
 
   # ---------------------------------------------------------------------------
@@ -327,14 +329,16 @@ jobs:
           BG_TMP=$(mktemp -d)
           SAFE=$(echo "$APP_NAME" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
           SAFE_UPPER=$(LC_ALL=fr_FR.UTF-8 awk '{print toupper($0)}' <<< "$SAFE")
+          # Palette light : off-white (#f4f4f5 zinc-100) + grille zinc-200 +
+          # texte zinc-500/600. Aligné sur Tahoe system bg + style blueprint.
           cat > "$BG_TMP/bg.svg" <<EOF
           <svg xmlns="http://www.w3.org/2000/svg" width="540" height="360" viewBox="0 0 540 360">
             <defs>
               <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
-                <path d="M36 0 L0 0 0 36" stroke="#27272a" stroke-width="0.5" fill="none"/>
+                <path d="M36 0 L0 0 0 36" stroke="#e4e4e7" stroke-width="0.5" fill="none"/>
               </pattern>
             </defs>
-            <rect width="540" height="360" fill="#18181b"/>
+            <rect width="540" height="360" fill="#f4f4f5"/>
             <rect width="540" height="360" fill="url(#grid)"/>
             <text x="270" y="62" text-anchor="middle"
                   font-family="-apple-system, BlinkMacSystemFont, system-ui, sans-serif"
@@ -344,14 +348,22 @@ jobs:
                       stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             <text x="270" y="312" text-anchor="middle"
                   font-family="-apple-system, BlinkMacSystemFont, system-ui, sans-serif"
-                  font-size="11.5" fill="#a1a1aa">Glissez l'application vers le dossier Applications</text>
+                  font-size="11.5" fill="#52525b">Glissez l'application vers le dossier Applications</text>
           </svg>
           EOF
           rsvg-convert -w 540 -h 360 "$BG_TMP/bg.svg" -o "$BG_TMP/bg.png"
 
+          # --volicon : on réutilise l'icns custom/fallback comme icône du
+          # volume monté (visible dans la sidebar Finder + Bureau).
+          VOLICON_ARGS=()
+          if [ -f player/src-tauri/icons/icon.icns ]; then
+            VOLICON_ARGS=(--volicon "$(pwd)/player/src-tauri/icons/icon.icns")
+          fi
+
           DMG_OUT="$BG_TMP/${APP_NAME}.dmg"
           create-dmg \
             --volname "$APP_NAME" \
+            "${VOLICON_ARGS[@]}" \
             --background "$BG_TMP/bg.png" \
             --window-pos 200 120 \
             --window-size 540 360 \
@@ -427,7 +439,9 @@ jobs:
           SLUG: ${{ inputs.slug }}
           APP_SLUG: ${{ inputs.app_slug }}
         run: |
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-*"
+          # Wipe ONLY le player-mac.dmg précédent — pas tout le player-* (sinon
+          # un build macOS effacerait un APK/EXE issus d'un autre job).
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-mac.dmg"
           rsync -avz "${DMG_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-mac.dmg"
 
   # ---------------------------------------------------------------------------
@@ -531,7 +545,9 @@ jobs:
           SLUG: ${{ inputs.slug }}
           APP_SLUG: ${{ inputs.app_slug }}
         run: |
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-*"
+          # Wipe ONLY le player-windows.exe précédent — pas tout le player-*
+          # (sinon un build Windows effacerait un APK/DMG issus d'un autre job).
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-windows.exe"
           scp "${EXE_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-windows.exe"
 
   # ---------------------------------------------------------------------------
