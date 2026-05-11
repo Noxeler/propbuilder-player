@@ -153,6 +153,30 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
         run: npm run tauri android init
 
+      # Tauri 2 `android init` régénère les mipmap launcher depuis son
+      # template interne (logo Tauri bleu/jaune) — il ignore icons/icon.png.
+      # On overwrite les 5 densités Android avec notre icône custom AVANT
+      # le build, sinon l'APK sort avec le logo Tauri partout sur le
+      # launcher Android.
+      - name: Overwrite Android mipmaps with custom icon
+        working-directory: player
+        run: |
+          ICON_SRC=src-tauri/icons/icon.png
+          RES=src-tauri/gen/android/app/src/main/res
+          if [ ! -f "$ICON_SRC" ] || [ ! -d "$RES" ]; then
+            echo "::warning::Icon source ou res dir absent — skip mipmap overwrite"
+            exit 0
+          fi
+          for entry in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
+            IFS=: read -r density launcher_sz fg_sz <<< "$entry"
+            dir="$RES/mipmap-$density"
+            mkdir -p "$dir"
+            convert "$ICON_SRC" -resize "${launcher_sz}x${launcher_sz}" "$dir/ic_launcher.png"
+            convert "$ICON_SRC" -resize "${launcher_sz}x${launcher_sz}" "$dir/ic_launcher_round.png"
+            convert "$ICON_SRC" -resize "${fg_sz}x${fg_sz}" "$dir/ic_launcher_foreground.png"
+          done
+          echo "✓ mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher*.png remplacées"
+
       - name: Build Android APK (debug, arm64 only)
         working-directory: player
         env:
