@@ -177,6 +177,42 @@ jobs:
           done
           echo "✓ mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher*.png remplacées"
 
+      # Patch MainActivity.kt pour immersive sticky (hide status + nav bars).
+      # Tauri 2 init ne met que enableEdgeToEdge → contenu sous les barres
+      # mais barres visibles. WindowInsetsController.hide(systemBars) cache
+      # vraiment.
+      - name: Patch MainActivity.kt — immersive sticky
+        working-directory: player
+        run: |
+          MAIN_ACTIVITY=$(find src-tauri/gen/android/app/src/main/java -name "MainActivity.kt" | head -1)
+          if [ -z "$MAIN_ACTIVITY" ]; then
+            echo "::warning::MainActivity.kt introuvable — skip immersive patch"
+            exit 0
+          fi
+          PKG=$(awk '/^package /{print $2; exit}' "$MAIN_ACTIVITY")
+          cat > "$MAIN_ACTIVITY" <<EOF
+          package $PKG
+
+          import android.os.Bundle
+          import androidx.activity.enableEdgeToEdge
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+
+          class MainActivity : TauriActivity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+              enableEdgeToEdge()
+              super.onCreate(savedInstanceState)
+              WindowCompat.setDecorFitsSystemWindows(window, false)
+              val controller = WindowInsetsControllerCompat(window, window.decorView)
+              controller.hide(WindowInsetsCompat.Type.systemBars())
+              controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+          }
+          EOF
+          echo "✓ MainActivity.kt patched ($MAIN_ACTIVITY)"
+
       - name: Build Android APK (debug, arm64 only)
         working-directory: player
         env:
