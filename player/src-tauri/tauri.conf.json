@@ -35,13 +35,13 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15",
-      "hardenedRuntime": true,
-      "dmg": {
-        "background": "dmg-background.png",
-        "windowSize": { "width": 540, "height": 360 },
-        "appPosition": { "x": 140, "y": 170 },
-        "applicationFolderPosition": { "x": 400, "y": 170 }
-      }
+      "hardenedRuntime": true
+    },
+    "dmg": {
+      "background": "dmg-background.png",
+      "windowSize": { "width": 540, "height": 360 },
+      "appPosition": { "x": 140, "y": 170 },
+      "applicationFolderPosition": { "x": 400, "y": 170 }
     }
   }
 }
