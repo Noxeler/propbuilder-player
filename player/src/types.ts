@@ -78,6 +78,7 @@ export interface CanvasElement {
   cropY?: number
   cropWidth?: number
   cropHeight?: number
+  cropShape?: 'rectangle' | 'circle' | 'triangle'
   iconName?: string
   autoplay?: boolean
   loop?: boolean
@@ -114,6 +115,8 @@ export interface CanvasElement {
   toastTimestamp?: string
   toastDurationMs?: number
   toastDirection?: 'top' | 'bottom' | 'left' | 'right'
+  toastFontScale?: number
+  toastInfinite?: boolean
   entryAnimation?: EntryAnimation
   entryDuration?: number
   entryEasing?: AnimEasing
@@ -122,6 +125,12 @@ export interface CanvasElement {
   liveMode?: LiveTextMode
   liveScriptedText?: string
   livePlaceholder?: string
+  livePlaceholderColor?: string
+  livePlaceholderBold?: boolean
+  livePlaceholderItalic?: boolean
+  livePlaceholderUnderline?: boolean
+  livePlaceholderStrokeColor?: string
+  livePlaceholderStrokeWidth?: number
   liveFocusMode?: 'auto' | 'click'
   onEnterAction?: TriggerAction
   enterTargetPageId?: string
@@ -135,7 +144,7 @@ export interface CanvasElement {
   // Pour swipeStyle === 'knob' : id d'un élément utilisé comme knob
   // custom (image / forme). Remplace le knob blanc par défaut.
   swipeKnobElementId?: string
-  // Multi-direction (Tinder-like) : si défini, prévaut sur swipeDirection.
+  // Multi-direction (cartes à swiper) : si défini, prévaut sur swipeDirection.
   swipeDirections?: ('left' | 'right' | 'up' | 'down')[]
   // Actions par direction pour le mode multi-direction.
   swipeDirectionalActions?: Partial<
@@ -169,6 +178,9 @@ export interface Page {
   onAnimationEnd?: TriggerAction
   animationEndTargetPageId?: string
   paramBindings?: Record<string, { name: string }>
+  // Overlay refs scopés à cette page (override de l'app-level).
+  topOverlayPageId?: string
+  bottomOverlayPageId?: string
 }
 
 export type AppDeviceType =
@@ -188,6 +200,26 @@ export interface App {
   pages: Page[]
   version?: string
   iconDataUrl?: string
+  // Overlays au niveau app (rendus en plus des overlays page-level —
+  // cumul, app-level rendu par-dessus).
+  topOverlayPageId?: string
+  bottomOverlayPageId?: string
+  // Pages où l'overlay app-level overlay haut/bas doit être masqué.
+  // Configurable depuis le PropertiesPanel d'un overlay app-level dans
+  // l'éditeur. nil/empty = visible partout.
+  topOverlayHiddenOnPageIds?: string[]
+  bottomOverlayHiddenOnPageIds?: string[]
+}
+
+// Police custom uploadée par l'utilisateur depuis l'éditeur. Stockée en
+// data URL inline dans le project.json publié — le player la charge via
+// l'API FontFace au boot pour qu'elle soit dispo avant le premier paint.
+export interface CustomFont {
+  id: string
+  name: string         // utilisé comme font-family dans les éléments text/livetext
+  source: 'upload' | 'google' | 'system' | string
+  dataUrl?: string     // base64 inline (woff2/ttf/otf)
+  weight?: number
 }
 
 export interface Project {
@@ -195,6 +227,7 @@ export interface Project {
   slug: string
   name: string
   apps: App[]
+  fonts?: CustomFont[]
   isPublic?: boolean
   previewToken?: string
 }

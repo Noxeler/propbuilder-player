@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Stage, Layer, Group } from 'react-konva'
+import type Konva from 'konva'
 import { PreviewElement } from './PreviewElement'
 import { playSounds } from './soundRegistry'
 import { IosToast, type IosToastData } from './IosToast'
@@ -9,6 +10,7 @@ import type {
   Project,
   App as AppType,
   CanvasElement,
+  CustomFont,
   TriggerAction,
 } from './types'
 import { TEMP_PRESETS, DEFAULT_FILTER, type FilterState } from './filterPresets'
@@ -60,15 +62,180 @@ function computeHiddenOffset(
   }
 }
 
+// Polices ABSOLUMENT toujours dispos en natif iOS WKWebView, même quand
+// le project.json ne les déclare pas explicitement dans project.fonts.
+// Si le fontFamily d'un élément matche un de ces noms, pas besoin de
+// charger quoi que ce soit, le navigateur les rendra direct.
+const SYSTEM_FONT_NAMES = new Set([
+  'Arial',
+  'Helvetica',
+  'Helvetica Neue',
+  'Times New Roman',
+  'Times',
+  'Georgia',
+  'Courier New',
+  'Courier',
+  'Verdana',
+  'Trebuchet MS',
+  'Impact',
+  'Comic Sans MS',
+  'San Francisco',
+  'SF Pro Display',
+  'SF Pro Text',
+  '-apple-system',
+  'system-ui',
+  'sans-serif',
+  'serif',
+  'monospace',
+])
+
+// Track des fonts déjà chargées pour éviter les doubles-loads quand
+// le projet a plusieurs éléments avec la même fontFamily.
+const loadedFontFamilies = new Set<string>()
+
+function appendGoogleFontLink(family: string, weight?: number): void {
+  // Sans poids spécifié → on demande 400 ET 700 dans la même requête CSS.
+  // Sinon, le rendu bold (Konva fontStyle='bold' → font-weight 700)
+  // tombe sur du faux-bold synthétique léger, sensible sur iOS WKWebView.
+  const wghtSpec = weight ? String(weight) : '400;700'
+  const key = `g:${family}@${wghtSpec}`
+  if (loadedFontFamilies.has(key)) return
+  loadedFontFamilies.add(key)
+  const encoded = family.replace(/\s+/g, '+')
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = `https://fonts.googleapis.com/css2?family=${encoded}:wght@${wghtSpec}&display=swap`
+  document.head.appendChild(link)
+}
+
+async function loadCustomFontFace(
+  name: string,
+  dataUrl: string,
+  weight?: number
+): Promise<void> {
+  // Cache key DOIT inclure le poids — sinon, quand le bundle contient
+  // 2 entries pour la même famille (Inter@400 + Inter@700), la 2ème
+  // est skippée à cause du cache, et Konva ne trouve pas le poids 700
+  // → faux-bold synthétique sur iOS WKWebView (rendu "moins gras").
+  const key = `c:${name}:${weight ?? 'any'}`
+  if (loadedFontFamilies.has(key)) return
+  loadedFontFamilies.add(key)
+  try {
+    const face = new FontFace(
+      name,
+      `url(${dataUrl})`,
+      weight ? { weight: String(weight) } : {}
+    )
+    await face.load()
+    document.fonts.add(face)
+  } catch (err) {
+     
+    console.warn('[player] custom font load failed', name, weight, err)
+  }
+}
+
+// Scanne récursivement le projet pour collecter toutes les fontFamily
+// utilisées par les éléments texte/livetext (et les autres types qui
+// peuvent en porter une, ex: button label).
+function collectUsedFontFamilies(project: Project): Set<string> {
+  const out = new Set<string>()
+  for (const app of project.apps) {
+    for (const page of app.pages) {
+      for (const el of page.elements) {
+        const ff = (el as { fontFamily?: string }).fontFamily
+        if (ff && typeof ff === 'string') {
+          // Une fontFamily CSS peut être une chaîne avec fallbacks
+          // ("Inter, sans-serif") — on garde juste le premier élément.
+          const primary = ff.split(',')[0].trim().replace(/^["']|["']$/g, '')
+          if (primary) out.add(primary)
+        }
+      }
+    }
+  }
+  return out
+}
+
+// Charge toutes les fonts requises par le projet AVANT de rendre, pour
+// éviter le FOUT (flash of unstyled text). Three-tier strategy :
+//   1) Polices système (Arial, Helvetica, etc.) → rien à faire.
+//   2) Polices déclarées dans project.fonts[] → load explicite (custom
+//      via FontFace, google via <link>).
+//   3) Polices référencées par fontFamily mais pas dans project.fonts
+//      (cas légacy) → on tente Google Fonts en best-effort. Si le nom
+//      ne matche pas un Google Font, le <link> retourne une 404 sans
+//      casser l'app.
+async function loadAllFonts(project: Project): Promise<void> {
+  const declared = new Map<string, CustomFont>()
+  for (const f of project.fonts ?? []) {
+    declared.set(f.name, f)
+  }
+
+  const customLoads: Promise<void>[] = []
+  for (const f of declared.values()) {
+    if (f.source === 'system' || SYSTEM_FONT_NAMES.has(f.name)) continue
+    if (f.source === 'google') {
+      appendGoogleFontLink(f.name, f.weight)
+    } else if (f.dataUrl) {
+      // 'custom' ou source non précisé mais dataUrl présent → custom inline
+      customLoads.push(loadCustomFontFace(f.name, f.dataUrl, f.weight))
+    } else {
+      // Source inconnu sans dataUrl : on tente Google Fonts en fallback.
+      appendGoogleFontLink(f.name, f.weight)
+    }
+  }
+
+  // Tier 3 : fontFamily des éléments non couvertes par project.fonts.
+  // On suppose que c'est probablement Google Fonts ; si le nom ne matche
+  // rien chez Google, le <link> 404 silencieusement et on retombe sur
+  // le fallback générique CSS — pas pire qu'avant.
+  const used = collectUsedFontFamilies(project)
+  for (const family of used) {
+    if (SYSTEM_FONT_NAMES.has(family)) continue
+    if (declared.has(family)) continue
+    appendGoogleFontLink(family)
+  }
+
+  // Attendre que les FontFace inline soient prêts. On n'attend pas les
+  // Google Fonts (chargés via <link>) — `display=swap` gère ça côté CSS,
+  // les éléments s'afficheront avec un fallback puis flip dès que la
+  // police est dispo.
+  await Promise.all(customLoads)
+}
+
 function App() {
   const [project, setProject] = useState<Project | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/project.json')
+    // Path relatif (pas '/project.json') : le player tourne aussi bien
+    // depuis un host HTTP(S) que depuis un file:// URL côté iOS Viewer
+    // (loadFileURL d'WKWebView). './' marche dans les deux cas.
+    fetch('./project.json')
       .then((r) => r.json())
-      .then((p: Project) => setProject(p))
+      .then(async (p: Project) => {
+        await loadAllFonts(p)
+        setProject(p)
+      })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+  }, [])
+
+  // Sur Tauri Android : enable immersive fullscreen au boot pour cacher
+  // status bar + nav bar Android (sinon elles mangent ~150px ET la nav
+  // bar masque le bas du Stage — APK testé sur Crosscall Core-X4
+  // montrait une zone blanche en bas avec barre Android visible).
+  // HTML5 Fullscreen API ne touche pas les barres système sous Tauri ;
+  // il faut taper dans WindowInsetsController côté Java via setFullscreen.
+  // Gate stricte : runtime Tauri ET Android (web/iOS Safari/desktop pas
+  // affectés — tauri.conf.json garde sa config window normale).
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!('__TAURI_INTERNALS__' in window)) return
+    if (!/Android/i.test(navigator.userAgent)) return
+    import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => getCurrentWindow().setFullscreen(true))
+      .catch((err) => {
+        console.warn('[player] setFullscreen failed', err)
+      })
   }, [])
 
   if (error) return <Centered>Erreur : {error}</Centered>
@@ -87,6 +254,22 @@ function PlayerShell({
   app: AppType
 }) {
   const [mode, setMode] = useState<'menu' | 'playing'>('menu')
+  // Bridge JS→iOS : poste le mode courant à l'app native PropBuilder
+  // Viewer pour qu'elle cache son bouton Fermer en haut-droite quand
+  // le projet tourne. window.webkit.messageHandlers est défini par
+  // WKWebView via config.userContentController.add(...). Aucun effet
+  // dans la PWA Safari (l'objet est undefined → optional chain).
+  useEffect(() => {
+    type WebKitWindow = {
+      webkit?: {
+        messageHandlers?: {
+          playerState?: { postMessage: (m: unknown) => void }
+        }
+      }
+    }
+    const w = window as unknown as WebKitWindow
+    w.webkit?.messageHandlers?.playerState?.postMessage(mode)
+  }, [mode])
   const [activeTab, setActiveTab] = useState<Tab>('infos')
   const [showExplanations, setShowExplanations] = useState(false)
   const [explanationDismissed, setExplanationDismissed] = useState(false)
@@ -96,16 +279,105 @@ function PlayerShell({
   }
   const [filter, setFilter] = useState<FilterState>(DEFAULT_FILTER)
   // Overrides saisis dans le tab Édition — { elementId → { fieldName → valeur } }.
-  const [paramOverrides, setParamOverrides] = useState<ParamOverrides>({})
+  // **Persistance localStorage** : scopé par app.id (chaque app a sa clé
+  // séparée), survit à fermeture/réouverture/relance du device. Pas de sync
+  // cloud — chaque device-prop garde ses valeurs en local. Les overrides
+  // orphelins (ownerId/field qui n'existent plus après republication) sont
+  // nettoyés en effet plus bas, dès que paramBindingList est stable.
+  const paramStorageKey = `pb:params:${app.id}`
+  const [paramOverrides, setParamOverrides] = useState<ParamOverrides>(() => {
+    try {
+      const raw = localStorage.getItem(paramStorageKey)
+      if (!raw) return {}
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as ParamOverrides
+      }
+      return {}
+    } catch {
+      return {}
+    }
+  })
+  useEffect(() => {
+    try {
+      if (Object.keys(paramOverrides).length === 0) {
+        localStorage.removeItem(paramStorageKey)
+      } else {
+        localStorage.setItem(paramStorageKey, JSON.stringify(paramOverrides))
+      }
+    } catch {
+      // Quota atteint ou storage désactivé → on ignore. Les overrides
+      // resteront en mémoire pour la session courante mais ne survivront
+      // pas au reload.
+    }
+  }, [paramOverrides, paramStorageKey])
   const [currentPageId, setCurrentPageId] = useState<string | null>(
     app.pages[0]?.id ?? null
   )
   const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set())
-  const [toast, setToast] = useState<{
+  // Ref tracking : la page-cible d'un swipe slide en cours OU récent.
+  // Set par le swipe-end handler avant fireAction(setCurrentPageId), lu
+  // ensuite par (1) pageAnim qui force type='none' au mount, (2) le useEffect
+  // d'init de visibleIds qui inclut les éléments à appearDelay (déjà visibles
+  // pendant le drag), (3) le PreviewElement skipEntryAnimation. Cleared
+  // seulement quand currentPage.id change AWAY (effet plus bas) — flippe
+  // jamais en cours de stay-on-target.
+  const skipPageEntryForRef = useRef<string | null>(null)
+  // playKey s'incrémente à chaque entrée (ou re-entrée) en mode 'playing'.
+  // Inclus dans les runKey de useEntryAnimation (page + éléments) pour
+  // que les animations redémarrent depuis zéro à chaque replay, même si
+  // on retombe sur la même page avec la même visibility. Mirror PreviewShell.
+  const [playKey, setPlayKey] = useState(0)
+  useEffect(() => {
+    if (mode === 'playing') {
+      setPlayKey((k) => k + 1)
+      // Reset les artefacts du précédent play pour repartir clean :
+      // skipPageEntryForRef pourrait pointer sur la page courante depuis
+      // le dernier swipe, ce qui ferait skipper l'animation au replay.
+      skipPageEntryForRef.current = null
+      // Wipe les toasts encore à l'écran (notamment infinis ou rejoués
+      // via raccourci au play précédent) — sinon après 3-doigts → menu
+      // → Play, le toast ressurgissait alors qu'à t=0 du nouveau play
+      // il n'est pas censé être visible. La page-entry effect ré-arme
+      // ensuite ceux qui doivent apparaître à l'arrivée.
+      setToasts([])
+      // Retourne à la page d'accueil. Sans ça, après un swipe vers une
+      // page X puis 3-doigts → menu → Play, on reprenait là où on
+      // s'était arrêté au lieu de rejouer le projet depuis le début.
+      // Skip les pages overlay pour ne pas tomber sur une page vide.
+      const overlayIds = new Set<string>()
+      for (const pg of app.pages) {
+        if (pg.topOverlayPageId) overlayIds.add(pg.topOverlayPageId)
+        if (pg.bottomOverlayPageId) overlayIds.add(pg.bottomOverlayPageId)
+      }
+      if (app.topOverlayPageId) overlayIds.add(app.topOverlayPageId)
+      if (app.bottomOverlayPageId) overlayIds.add(app.bottomOverlayPageId)
+      const firstRegular =
+        app.pages.find((p) => !overlayIds.has(p.id)) ?? app.pages[0]
+      if (firstRegular) setCurrentPageId(firstRegular.id)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
+  // Tableau (et non `toast | null`) pour qu'une notif infinie puisse
+  // coexister avec une notif éphémère qui apparaît ensuite — sans la
+  // remplacer. Chaque entrée a un id unique généré par toastCounterRef.
+  const [toasts, setToasts] = useState<Array<{
     data: IosToastData
     durationMs: number
-  } | null>(null)
+    // onTap : callback déclenché au clic sur la carte du toast. Permet
+    // de composer flexiblement (action ET/OU navigation) selon ce que
+    // l'élément source définit. Stocké ici plutôt que dans IosToastData
+    // pour ne pas polluer le type qui sert aussi au preview/drag.
+    onTap?: () => void
+    // Id de l'élément source — sert à dédupliquer : si la même notif
+    // est rejouée (shortcut, re-trigger), on retire l'instance précédente
+    // avant d'ajouter la nouvelle, sinon une notif infinie persisterait
+    // en doublon.
+    sourceElementId?: string
+  }>>([])
   const toastCounterRef = useRef(0)
+  const dismissToast = (id: number) =>
+    setToasts((prev) => prev.filter((t) => t.data.id !== id))
   const [liveTexts, setLiveTexts] = useState<Record<string, string>>({})
   const [focusedLiveId, setFocusedLiveId] = useState<string | null>(null)
   const [scrollY, setScrollY] = useState(0)
@@ -152,6 +424,13 @@ function PlayerShell({
 
   useEffect(() => {
     if (mode !== 'playing' || !currentPage) return
+    // Quand on arrive sur cette page via un swipe slide, l'utilisateur a
+    // déjà vu la page complète glisser devant ses yeux pendant 260ms —
+    // les éléments à appearDelay y étaient déjà visibles (pré-poppés par
+    // l'effet sur slideIncoming). Re-jouer leur cascade au mount serait
+    // redondant et casserait le visuel. Mirror PreviewShell.tsx ligne 415.
+    const arrivedViaSlide =
+      skipPageEntryForRef.current === currentPage.id
     const initial = new Set<string>()
     for (const el of currentPage.elements) {
       if (el.hidden) continue
@@ -159,7 +438,14 @@ function PlayerShell({
       // Les images pilotées par un livetext démarrent toujours masquées ;
       // c'est l'effet de prefix-match qui décidera laquelle s'affiche.
       if (triggerTargetIds.has(el.id)) continue
-      if (!el.hiddenInitially && !(el.appearDelay && el.appearDelay > 0)) {
+      if (el.hiddenInitially) continue
+      // Cas normal : pas d'appearDelay → visible direct.
+      // Cas slide : on inclut les éléments à appearDelay aussi, ils sont
+      // déjà visibles depuis le drag.
+      if (
+        !(el.appearDelay && el.appearDelay > 0) ||
+        arrivedViaSlide
+      ) {
         initial.add(el.id)
       }
     }
@@ -168,6 +454,9 @@ function PlayerShell({
     for (const el of currentPage.elements) {
       if (el.hidden) continue
       if (el.type === 'toast') {
+        // En arrivée par slide, on skip les toasts à appearDelay aussi
+        // (ils auraient déjà fait leur entrée pendant le drag).
+        if (arrivedViaSlide && (el.appearDelay ?? 0) > 0) continue
         const delay = el.appearDelay ?? 0
         const t = setTimeout(() => {
           showToast(
@@ -181,8 +470,12 @@ function PlayerShell({
               width: el.width > 0 ? el.width : undefined,
               height: el.width > 0 && el.height > 0 ? el.height : undefined,
               direction: el.toastDirection,
+              fontScale: el.toastFontScale ? el.toastFontScale / 100 : undefined,
+              infinite: el.toastInfinite || undefined,
             },
-            el.toastDurationMs ?? 4500
+            el.toastDurationMs ?? 4500,
+            buildToastOnTap(el),
+            el.id
           )
         }, delay)
         timers.push(t)
@@ -190,6 +483,9 @@ function PlayerShell({
       }
       if (el.hiddenInitially) continue
       if (!el.appearDelay || el.appearDelay <= 0) continue
+      // Skip le timer pour les éléments déjà inclus en initial via le
+      // chemin arrivedViaSlide.
+      if (arrivedViaSlide) continue
       const t = setTimeout(() => {
         setVisibleIds((s) => {
           const next = new Set(s)
@@ -240,10 +536,44 @@ function PlayerShell({
 
   const showToast = (
     data: Omit<IosToastData, 'id'>,
-    durationMs = 4500
+    durationMs = 4500,
+    onTap?: () => void,
+    sourceElementId?: string
   ) => {
     const id = ++toastCounterRef.current
-    setToast({ data: { id, ...data }, durationMs })
+    setToasts((prev) => {
+      // Dédup par source : retire l'instance courante si la même notif
+      // est rejouée. Sinon une notif infinie déclenchée 2× resterait
+      // en doublon visuel.
+      const filtered = sourceElementId
+        ? prev.filter((t) => t.sourceElementId !== sourceElementId)
+        : prev
+      return [
+        ...filtered,
+        { data: { id, ...data }, durationMs, onTap, sourceElementId },
+      ]
+    })
+  }
+
+  // Compose le onTap d'un toast déclenché depuis un élément source
+  // (toast élément, ou shortcut sur cet élément, ou appearDelay timer).
+  // Mirror PreviewShell : on respecte src.onClickAction puis src.targetPageId
+  // en fallback. Renvoie undefined si l'élément n'a aucune action — le
+  // toast sera juste dismissable au tap.
+  const buildToastOnTap = (src: CanvasElement): (() => void) | undefined => {
+    if (src.onClickAction) {
+      const a = src.onClickAction
+      return () => executeAction(a)
+    }
+    if (src.targetPageId) {
+      const target = src.targetPageId
+      return () => {
+        if (app.pages.some((p) => p.id === target)) {
+          setCurrentPageId(target)
+        }
+      }
+    }
+    return undefined
   }
 
   const executeAction = (action: TriggerAction) => {
@@ -322,6 +652,38 @@ function PlayerShell({
     }
     return out
   }, [app.pages])
+
+  // Nettoyage des overrides orphelins : si l'éditeur a renommé/supprimé
+  // un binding entre deux publications, les anciennes entrées dans
+  // paramOverrides (et donc dans localStorage) ne matchent plus rien.
+  // On les filtre dès que paramBindingList est stable.
+  useEffect(() => {
+    setParamOverrides((current) => {
+      if (Object.keys(current).length === 0) return current
+      const validFields = new Map<string, Set<string>>()
+      for (const b of paramBindingList) {
+        if (!validFields.has(b.ownerId)) validFields.set(b.ownerId, new Set())
+        validFields.get(b.ownerId)!.add(b.field)
+      }
+      let changed = false
+      const next: ParamOverrides = {}
+      for (const [ownerId, fields] of Object.entries(current)) {
+        const allowed = validFields.get(ownerId)
+        if (!allowed) {
+          changed = true
+          continue
+        }
+        const cleanFields: Record<string, unknown> = {}
+        for (const [f, v] of Object.entries(fields)) {
+          if (allowed.has(f)) cleanFields[f] = v
+          else changed = true
+        }
+        if (Object.keys(cleanFields).length > 0) next[ownerId] = cleanFields
+      }
+      return changed ? next : current
+    })
+  }, [paramBindingList])
+
   const [size, setSize] = useState({
     w: window.innerWidth,
     h: window.innerHeight,
@@ -336,23 +698,51 @@ function PlayerShell({
   // Geste 3 doigts × 3 taps = retour menu (utile en mode playing sur
   // touchscreen).
   //
-  // Détection robuste : fenêtre 150 ms pour reconnaître 3 doigts décalés
-  // comme un seul tap collectif (un `if (e.touches.length === 3)` strict
-  // rate quand les doigts touchent à 10-30 ms d'écart, ce qui est le cas
-  // naturel quand l'utilisateur pose ses 3 doigts). Garde-fou de 120 ms
-  // entre 2 taps collectifs pour ne pas compter 2 doigts arrivés en
-  // retard comme un 2e tap.
+  // Évolution du geste :
+  //   v1 : e.touches.length === 3 sur 1 touchstart → ratait souvent
+  //   v2 : 3 doigts en fenêtre 80ms × 3 taps → user devait s'y reprendre
+  //   v3 : 3 doigts en fenêtre 150ms × 2 taps → trop facile à déclencher
+  //        par accident pendant une démo prolongée
+  //   v4 (actuel) : 3 doigts en fenêtre 150ms × 3 taps + cancel auto du
+  //                 swipe single-finger qui aurait pu démarrer
+  //
+  // 3 taps : assez délibéré pour éviter les faux positifs (un test
+  // utilisateur appuie naturellement sur l'écran à plusieurs reprises),
+  // tout en restant accessible.
   useEffect(() => {
     let recentDigitAdds: number[] = []
     let tapTimes: number[] = []
     const onTouchStart = (e: TouchEvent) => {
       const now = Date.now()
+      // Dès que 2+ doigts touchent l'écran, on annule un éventuel
+      // swipe single-finger en cours. L'utilisateur est probablement
+      // en train de poser 3 doigts pour le geste menu — sans cancel,
+      // le 1er doigt avait déjà initié un swipe-to-page (cf swipe
+      // pointermove handler global) que l'utilisateur ne voulait pas.
+      if (e.touches.length >= 2) {
+        if (swipeAnimRef.current !== null) {
+          cancelAnimationFrame(swipeAnimRef.current)
+          swipeAnimRef.current = null
+        }
+        swipeDragRef.current = null
+        setActiveSwipeId(null)
+        setSwipeOffset({ x: 0, y: 0 })
+      }
+      // Compte chaque nouveau doigt qui vient de toucher l'écran.
       for (let i = 0; i < e.changedTouches.length; i++) {
         recentDigitAdds.push(now)
       }
+      // Fenêtre 150 ms pour reconnaître 3 doigts décalés comme un seul
+      // tap collectif. 150 ms est tolérant (l'utilisateur a le temps de
+      // poser ses doigts naturellement) sans risquer de mélanger 2 taps
+      // séparés (intervalle minimum entre 2 taps humains > 200ms).
       recentDigitAdds = recentDigitAdds.filter((t) => now - t < 150)
       if (recentDigitAdds.length >= 3) {
         recentDigitAdds = []
+        // Garde-fou : on n'enregistre un tap collectif que si le
+        // précédent date d'au moins 120ms (sinon les 3 doigts qui
+        // arrivent en succession rapide pourraient être comptés comme
+        // 2 taps consécutifs et fausser le compteur).
         const lastTap = tapTimes[tapTimes.length - 1] ?? 0
         if (now - lastTap < 120) return
         tapTimes = tapTimes.filter((t) => now - t < 2000)
@@ -365,6 +755,7 @@ function PlayerShell({
     }
     window.addEventListener('touchstart', onTouchStart)
     return () => window.removeEventListener('touchstart', onTouchStart)
+     
   }, [])
 
   // Escape pour sortir sur desktop
@@ -376,8 +767,36 @@ function PlayerShell({
     return () => window.removeEventListener('keydown', onKey)
   }, [mode])
 
+  // Quand on quitte le mode playing, on sort aussi du fullscreen (cas
+  // 3-doigts × 3 ou Escape qui n'aurait pas été intercepté par le
+  // navigateur). Sur iOS Safari mobile, document.fullscreenElement est
+  // toujours null et exitFullscreen n'existe pas — no-op silencieux.
+  useEffect(() => {
+    if (mode === 'playing') return
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element
+      webkitExitFullscreen?: () => Promise<void>
+    }
+    const fsEl = doc.fullscreenElement ?? doc.webkitFullscreenElement
+    if (!fsEl) return
+    const exit = doc.exitFullscreen ?? doc.webkitExitFullscreen
+    if (exit) {
+      try {
+        const p = exit.call(doc)
+        if (p && typeof p.catch === 'function') p.catch(() => {})
+      } catch {
+        // ignore
+      }
+    }
+  }, [mode])
+
   // Raccourcis clavier (mirror de PreviewShell). Ignoré si livetext focusé
   // ou si l'utilisateur tape dans un input HTML (onglet Édition).
+  // Scanne currentPage + overlays (page-level + app-level) — un toast
+  // dans un overlay header doit pouvoir être déclenché depuis n'importe
+  // quelle page. Cas spéciaux pour toast/sound/video qui sont jamais
+  // dans visibleIds (toast = virtuel, sound = sans visuel, video peut
+  // être cachée mais shortcutable).
   useEffect(() => {
     if (mode !== 'playing' || !currentPage) return
     const onKey = (e: KeyboardEvent) => {
@@ -387,8 +806,68 @@ function PlayerShell({
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return
       if (e.key.length !== 1) return
       const key = e.key.toLowerCase()
-      for (const el of currentPage.elements) {
+
+      // Récolte page courante + overlays — pour le shortcut on inclut
+      // les éléments des overlays (les toasts globaux y vivent souvent).
+      const findP = (id: string | undefined) =>
+        id ? app.pages.find((p) => p.id === id) : null
+      const headerP = findP(currentPage.topOverlayPageId) ?? findP(app.topOverlayPageId)
+      const footerP = findP(currentPage.bottomOverlayPageId) ?? findP(app.bottomOverlayPageId)
+      const seen = new Set<string>()
+      const overlayPages = [headerP, footerP].filter(
+        (p): p is NonNullable<typeof p> => {
+          if (!p) return false
+          if (p.id === currentPage.id) return false
+          if (seen.has(p.id)) return false
+          seen.add(p.id)
+          return true
+        }
+      )
+      const allElements = [
+        ...currentPage.elements,
+        ...overlayPages.flatMap((p) => p.elements),
+      ]
+      for (const el of allElements) {
         if (el.shortcutKey !== key) continue
+        // Cas spéciaux : sound / video. Le shortcut joue (ou rejoue)
+        // directement la cible — visibleIds est by-passé (un son n'a
+        // pas de visuel et une vidéo cachée peut quand même être
+        // déclenchée selon l'intention auteur).
+        if (el.type === 'sound') {
+          playSounds([el.id])
+          continue
+        }
+        if (el.type === 'video') {
+          // Note : pas de toggleVideos dans le player Tauri actuel.
+          // playSounds suffit pour les vidéos audio-only ; pour les
+          // vraies vidéos, il faut un videoRegistry comme côté éditeur
+          // (à ajouter quand le besoin se présente).
+          continue
+        }
+        // Toast : la touche déclenche le toast (PAS son onClickAction
+        // qui est pour le clic SUR le toast). On clear l'éventuel
+        // timer d'apparition pour éviter le double-affichage.
+        if (el.type === 'toast') {
+          showToast(
+            {
+              title: el.toastTitle,
+              message: el.content ?? '',
+              iconDataUrl: el.toastIconDataUrl,
+              timestamp: el.toastTimestamp,
+              x: el.width > 0 ? el.x : undefined,
+              y: el.width > 0 ? el.y : undefined,
+              width: el.width > 0 ? el.width : undefined,
+              height: el.width > 0 && el.height > 0 ? el.height : undefined,
+              direction: el.toastDirection,
+              fontScale: el.toastFontScale ? el.toastFontScale / 100 : undefined,
+              infinite: el.toastInfinite || undefined,
+            },
+            el.toastDurationMs ?? 4500,
+            buildToastOnTap(el),
+            el.id
+          )
+          continue
+        }
         if (!visibleIds.has(el.id)) continue
         if (el.onClickAction) {
           executeAction(el.onClickAction)
@@ -401,6 +880,44 @@ function PlayerShell({
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, currentPage, focusedLiveId, visibleIds])
+
+  // Flèches gauche / droite : navigation directe entre pages (skip
+  // les interactions). Utile pour rejouer rapidement une séquence sans
+  // refaire tous les hotspots / swipes / shortcuts. On parcourt les
+  // pages "régulières" (non-overlay) dans l'ordre `app.pages`. Clamp
+  // aux bornes (pas de wrap), ignoré quand un livetext est focus ou
+  // qu'on tape dans un input HTML.
+  useEffect(() => {
+    if (mode !== 'playing' || !currentPage) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      if (focusedLiveId) return
+      const tgt = e.target as HTMLElement | null
+      const tag = tgt?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return
+      const overlayIds = new Set<string>()
+      for (const pg of app.pages) {
+        if (pg.topOverlayPageId) overlayIds.add(pg.topOverlayPageId)
+        if (pg.bottomOverlayPageId) overlayIds.add(pg.bottomOverlayPageId)
+      }
+      if (app.topOverlayPageId) overlayIds.add(app.topOverlayPageId)
+      if (app.bottomOverlayPageId) overlayIds.add(app.bottomOverlayPageId)
+      const regularPages = app.pages.filter((p) => !overlayIds.has(p.id))
+      if (regularPages.length === 0) return
+      const idx = regularPages.findIndex((p) => p.id === currentPage.id)
+      if (idx < 0) return
+      const nextIdx = e.key === 'ArrowRight' ? idx + 1 : idx - 1
+      if (nextIdx < 0 || nextIdx >= regularPages.length) return
+      e.preventDefault()
+      // skipPageEntryForRef.current = pageId → useEntryAnimation reçoit
+      // type='none' au mount → pas de fondu ni de slide, switch instantané.
+      skipPageEntryForRef.current = regularPages[nextIdx].id
+      setCurrentPageId(regularPages[nextIdx].id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, currentPage, focusedLiveId])
 
   const canvasScale = useMemo(() => {
     const sx = size.w / app.resolution.width
@@ -444,7 +961,61 @@ function PlayerShell({
     y: 0,
   })
   const [activeSwipeId, setActiveSwipeId] = useState<string | null>(null)
+
+  // slideIncoming : détecte la page de destination d'un swipe slide
+  // en cours (mirror PreviewShell). Sert de signal pour pré-populer
+  // visibleIds avec les éléments entrants.
+  const slideIncoming = useMemo(() => {
+    if (!currentPage || !activeSwipeId) return null
+    const activeEl = currentPage.elements.find((e) => e.id === activeSwipeId)
+    if (!activeEl) return null
+    if ((activeEl.swipeStyle ?? 'zone') !== 'zone') return null
+    if ((activeEl.swipeTransition ?? 'none') !== 'slide') return null
+    const ax = swipeOffset.x
+    const ay = swipeOffset.y
+    const horizontal = Math.abs(ax) > Math.abs(ay) && Math.abs(ax) > 4
+    const vertical = !horizontal && Math.abs(ay) > 4
+    let dir: 'left' | 'right' | 'up' | 'down' | null = null
+    if (horizontal) dir = ax > 0 ? 'right' : 'left'
+    else if (vertical) dir = ay > 0 ? 'down' : 'up'
+    if (!dir) return null
+    const perDir = activeEl.swipeDirectionalActions?.[dir]
+    const targetId = perDir?.targetPageId ?? activeEl.targetPageId
+    if (!targetId || targetId === currentPage.id) return null
+    const target = app.pages.find((p) => p.id === targetId)
+    if (!target) return null
+    return { page: target, dir }
+  }, [currentPage, activeSwipeId, swipeOffset.x, swipeOffset.y, app.pages])
+
+  // Pré-populate visibleIds avec les éléments de la page entrante dès
+  // que slideIncoming est détecté. Sans ça, au switch de currentPage,
+  // visibleIds reste celui de la page sortante pendant un frame → les
+  // éléments de la nouvelle page rendraient visible=false → unmount →
+  // remount-with-fresh-state → replay des animations d'entrée. Inclut
+  // les éléments à appearDelay : ils sont visibles pendant le glissement.
+  useEffect(() => {
+    if (!slideIncoming) return
+    const idsToAdd = slideIncoming.page.elements
+      .filter((el) => !el.hidden && el.type !== 'toast')
+      .map((el) => el.id)
+    if (idsToAdd.length === 0) return
+    setVisibleIds((prev) => {
+      let changed = false
+      const next = new Set(prev)
+      for (const id of idsToAdd) {
+        if (!next.has(id)) {
+          next.add(id)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [slideIncoming])
+
   const swipeAnimRef = useRef<number | null>(null)
+  // Ref sur le Stage Konva pour pouvoir convertir les coords écran en
+  // coords canvas (forward-tap quand un swipe couvre des hotspots dessous).
+  const stageRef = useRef<Konva.Stage>(null)
 
   // Éléments déjà révélés (ancrés à leur position designée) sur la page
   // courante. Reset à chaque changement de page — si l'utilisateur revient,
@@ -628,6 +1199,77 @@ function PlayerShell({
       return best
     }
 
+    // Cherche un élément cliquable (hotspot ou élément avec action) sous
+    // la position écran, en respectant le z-order (du plus haut au plus
+    // bas dans le tableau elements). Skippe l'élément swipe lui-même.
+    // Utilisé pour forwarder un tap "raté" quand un swipe couvre les
+    // hotspots dessous (sans cette passerelle, le swipe absorbe les taps
+    // de Crusher / boutons d'app et l'utilisateur a l'impression que les
+    // boutons ne marchent pas).
+    const findClickableUnder = (
+      clientX: number,
+      clientY: number,
+      excludeId: string
+    ): CanvasElement | null => {
+      const stage = stageRef.current
+      if (!stage || !currentPage) return null
+      const rect = stage.container().getBoundingClientRect()
+      const cx = (clientX - rect.left) / canvasScale
+      const cy = (clientY - rect.top) / canvasScale + scrollY
+      const hitsRect = (el: CanvasElement) =>
+        cx >= el.x &&
+        cx <= el.x + el.width &&
+        cy >= el.y &&
+        cy <= el.y + el.height
+      const hitsCircle = (el: CanvasElement) => {
+        const rx = el.width / 2
+        const ry = el.height / 2
+        const ddx = (cx - (el.x + rx)) / rx
+        const ddy = (cy - (el.y + ry)) / ry
+        return ddx * ddx + ddy * ddy <= 1
+      }
+      const isClickable = (el: CanvasElement) =>
+        el.type === 'hotspot' ||
+        !!el.targetPageId ||
+        !!el.onClickAction
+      // 1) Overlays (overlay haut / bas) — rendus au-dessus de la page
+      const overlayPages: typeof app.pages = []
+      const seen = new Set<string>()
+      for (const id of [
+        currentPage.topOverlayPageId,
+        app.topOverlayPageId,
+        currentPage.bottomOverlayPageId,
+        app.bottomOverlayPageId,
+      ]) {
+        if (!id || seen.has(id) || id === currentPage.id) continue
+        seen.add(id)
+        const pg = app.pages.find((p) => p.id === id)
+        if (pg) overlayPages.push(pg)
+      }
+      for (const pg of overlayPages) {
+        const els = pg.elements
+        for (let i = els.length - 1; i >= 0; i--) {
+          const el = els[i]
+          if (el.id === excludeId || el.hidden) continue
+          if (!isClickable(el)) continue
+          if (!hitsRect(el)) continue
+          if (el.type === 'hotspot' && el.hotspotShape === 'circle' && !hitsCircle(el)) continue
+          return el
+        }
+      }
+      // 2) Page courante
+      const els = currentPage.elements
+      for (let i = els.length - 1; i >= 0; i--) {
+        const el = els[i]
+        if (el.id === excludeId || el.hidden) continue
+        if (!isClickable(el)) continue
+        if (!hitsRect(el)) continue
+        if (el.type === 'hotspot' && el.hotspotShape === 'circle' && !hitsCircle(el)) continue
+        return el
+      }
+      return null
+    }
+
     const onUp = (e: PointerEvent) => {
       const drag = swipeDragRef.current
       if (!drag) return
@@ -638,6 +1280,21 @@ function PlayerShell({
       const primary = dirs[0] ?? 'right'
       const style = drag.el.swipeStyle ?? 'zone'
       const transition = drag.el.swipeTransition ?? 'none'
+
+      // Tap (mouvement < threshold) : on cherche un cliquable dessous et on
+      // y forwarde l'event. Évite que le swipe full-screen absorbe les taps
+      // sur les boutons de la page (cas des grilles d'icônes type SpringBoard).
+      const isTap =
+        Math.abs(dx) < SWIPE_THRESHOLD_PX && Math.abs(dy) < SWIPE_THRESHOLD_PX
+      if (isTap) {
+        const tapped = findClickableUnder(e.clientX, e.clientY, drag.el.id)
+        if (tapped) {
+          setSwipeOffset({ x: 0, y: 0 })
+          setActiveSwipeId(null)
+          handleHotspot(tapped)
+          return
+        }
+      }
 
       // Fire action pour la direction gagnante (per-direction en priorité,
       // sinon fallback sur l'action générique de l'élément).
@@ -766,6 +1423,15 @@ function PlayerShell({
             : winning === 'up'
               ? -app.resolution.height
               : 0
+        // Calcule la page cible AVANT la nav et arme le skip pour qu'au
+        // moment où setCurrentPageId switch sur la cible, son
+        // entryAnimation soit court-circuitée (la page a déjà glissé
+        // visuellement, pas besoin de la re-animer).
+        const perDir = drag.el.swipeDirectionalActions?.[winning]
+        const targetIdForSkip = perDir?.targetPageId ?? drag.el.targetPageId
+        if (targetIdForSkip && targetIdForSkip !== currentPage?.id) {
+          skipPageEntryForRef.current = targetIdForSkip
+        }
         animateTo(swipeOffset.x, swipeOffset.y, exitX, exitY, 260, () => {
           setSwipeOffset({ x: 0, y: 0 })
           setActiveSwipeId(null)
@@ -919,11 +1585,17 @@ function PlayerShell({
   const effectivePage = currentPage
     ? applyPageParamOverrides(currentPage, paramOverrides)
     : null
+  // skipPageEntryForRef est déclaré en haut du composant pour qu'il soit
+  // accessible par l'effet d'init visibleIds (qui doit savoir si on
+  // arrive via slide pour inclure les éléments à appearDelay sans timer).
+  const skipPageAnim =
+    !!skipPageEntryForRef.current &&
+    skipPageEntryForRef.current === currentPage?.id
   const pageAnim = useEntryAnimation({
-    type: effectivePage?.entryAnimation,
+    type: skipPageAnim ? 'none' : effectivePage?.entryAnimation,
     duration: effectivePage?.entryDuration,
     easing: effectivePage?.entryEasing,
-    runKey: `page:${currentPage?.id ?? ''}`,
+    runKey: `page:${currentPage?.id ?? ''}:${playKey}`,
     active: mode === 'playing' && !!currentPage,
     onDone: () => {
       if (!effectivePage) return
@@ -939,6 +1611,20 @@ function PlayerShell({
       }
     },
   })
+
+  // Clear le skip ref UNIQUEMENT quand on quitte la page cible. Si on
+  // flippe `type` (none → réelle) pendant qu'on est encore sur la même
+  // page, useEntryAnimation re-run et l'animation rejoue depuis zéro
+  // (le bug observé). Cf. PreviewShell pour la même logique.
+  useEffect(() => {
+    if (
+      skipPageEntryForRef.current &&
+      currentPage &&
+      skipPageEntryForRef.current !== currentPage.id
+    ) {
+      skipPageEntryForRef.current = null
+    }
+  }, [currentPage?.id])
 
   if (mode === 'playing') {
     return (
@@ -983,6 +1669,7 @@ function PlayerShell({
       >
         {currentPage ? (
           <Stage
+            ref={stageRef}
             width={canvasW}
             height={canvasH}
             scaleX={canvasScale}
@@ -990,6 +1677,16 @@ function PlayerShell({
           >
             <Layer y={-scrollY}>
               <Group
+                // Clé stable sur page.id : le slideIncoming Group ci-dessous
+                // a sa propre key={incomingPage.id}. Quand le swipe se
+                // termine et currentPage flip de A→B, React reconcile par
+                // key — le Group entrant (key=B) prend la place du Group
+                // courant (key=A unmount). Son fiber tree est préservé,
+                // donc les hooks (useEntryAnimation) gardent leur état au
+                // lieu d'être démontés-remontés. C'est ce qui empêche
+                // l'animation d'entrée de rejouer après le slide. Sans
+                // cette key, React utilise position et tout repart à zéro.
+                key={currentPage.id}
                 x={(() => {
                   const activeEl = currentPage?.elements.find(
                     (el) => el.id === activeSwipeId
@@ -1168,7 +1865,7 @@ function PlayerShell({
                           element={elForRender}
                           onHotspotClick={handleHotspot}
                           visible={visibleIds.has(el.id)}
-                          pageKey={currentPage?.id ?? ''}
+                          pageKey={`${currentPage?.id ?? ''}:${playKey}`}
                           onAnimationEnd={handleAnimationEnd}
                           liveTypedText={liveTexts[el.id]}
                           liveFocused={focusedLiveId === el.id}
@@ -1176,6 +1873,16 @@ function PlayerShell({
                           onSwipeStart={handleSwipeStart}
                           activeSwipeId={activeSwipeId}
                           swipeOffset={swipeOffset}
+                          // Note : on ne passe PAS skipEntryAnimation ici
+                          // (laissé à false). Le user veut que les
+                          // entry animations des éléments (zoom-in,
+                          // fade-in, etc.) JOUENT à l'arrivée par slide,
+                          // mais sans la cascade des appearDelay (qui
+                          // est gérée séparément par visibleIds pre-pop
+                          // + arrivedViaSlide → tous visibles d'un
+                          // coup). skipPageAnim reste utilisé seulement
+                          // pour pageAnim (zoom global de la page) qui
+                          // serait redondant avec le slide visuel.
                         />
                       </Group>
                     )
@@ -1210,7 +1917,127 @@ function PlayerShell({
                   return currentPage.elements.map(renderOne)
                 })()}
               </Group>
+              {/* Group entrant pendant un swipe slide — la page cible
+                  glisse depuis l'extérieur en miroir de la page courante,
+                  donnant le visuel iOS-native de page push. Mirror
+                  PreviewShell.tsx ligne 1862. Skip explicitement les
+                  entry animations puisque l'utilisateur voit la page
+                  arriver via le slide. */}
+              {slideIncoming && (() => {
+                const ax = swipeOffset.x
+                const ay = swipeOffset.y
+                let incomingX = 0
+                let incomingY = 0
+                if (slideIncoming.dir === 'right')
+                  incomingX = -app.resolution.width + ax
+                else if (slideIncoming.dir === 'left')
+                  incomingX = app.resolution.width + ax
+                else if (slideIncoming.dir === 'down')
+                  incomingY = -app.resolution.height + ay
+                else if (slideIncoming.dir === 'up')
+                  incomingY = app.resolution.height + ay
+                const incomingPage = slideIncoming.page
+                return (
+                  <Group
+                    key={incomingPage.id}
+                    x={app.resolution.width / 2 + incomingX}
+                    y={app.resolution.height / 2 + incomingY}
+                    offsetX={app.resolution.width / 2}
+                    offsetY={app.resolution.height / 2}
+                  >
+                    {incomingPage.elements
+                      .filter((el) => el.type !== 'toast' && !el.hidden)
+                      .map((el) => {
+                        const effEl = applyParamOverrides(el, paramOverrides)
+                        // CRITIQUE : on wrap chaque PreviewElement dans
+                        // un <Group key={el.id} x={0} y={0}> pour matcher
+                        // EXACTEMENT la structure produite par le Group
+                        // courant (qui wrap pareil pour pouvoir poser
+                        // un offset reveal/knob — ici 0 car la page
+                        // entrante n'a pas de swipe actif). Sans ce
+                        // wrapping, la profondeur de l'arbre est
+                        // différente entre incoming et current → React
+                        // ne reconcile PAS les fibers au flip → remount
+                        // des PreviewElement → useEntryAnimation
+                        // re-démarre depuis 0 → animation rejoue.
+                        // Mirror PreviewShell.tsx ligne 2183.
+                        return (
+                          <Group key={el.id} x={0} y={0}>
+                            <PreviewElement
+                              element={effEl}
+                              onHotspotClick={() => {}}
+                              visible={visibleIds.has(el.id)}
+                              pageKey={`${incomingPage.id}:${playKey}`}
+                            />
+                          </Group>
+                        )
+                      })}
+                  </Group>
+                )
+              })()}
             </Layer>
+            {/* Overlay layer — header & footer rendus par-dessus la page,
+                indépendants du scroll vertical et de la transition swipe
+                slide entre pages. Override : page-level masque app-level
+                pour chaque rôle. */}
+            {(() => {
+              const findP = (id: string | undefined) =>
+                id ? app.pages.find((p) => p.id === id) : null
+              // Cumul : page-level d'abord (en bas), app-level
+              // par-dessus. L'overlay général reste donc toujours
+              // visible même quand une page a son propre overlay.
+              // Mirror PreviewShell — changement 2026-05-05 (revert
+              // override → cumul à la demande user).
+              const headerPageOverlay = findP(currentPage?.topOverlayPageId)
+              const footerPageOverlay = findP(currentPage?.bottomOverlayPageId)
+              // App-level overlay peut être masqué sur certaines pages
+              // spécifiques (configuré dans l'éditeur PropertiesPanel
+              // section "Visibilité" d'un overlay app-level).
+              const hiddenHeader = new Set(app.topOverlayHiddenOnPageIds ?? [])
+              const hiddenFooter = new Set(app.bottomOverlayHiddenOnPageIds ?? [])
+              const headerAppOverlay =
+                currentPage && hiddenHeader.has(currentPage.id)
+                  ? null
+                  : findP(app.topOverlayPageId)
+              const footerAppOverlay =
+                currentPage && hiddenFooter.has(currentPage.id)
+                  ? null
+                  : findP(app.bottomOverlayPageId)
+              const seen = new Set<string>()
+              const overlayPages = [
+                headerPageOverlay,
+                footerPageOverlay,
+                headerAppOverlay,
+                footerAppOverlay,
+              ].filter(
+                (p): p is NonNullable<typeof p> => {
+                  if (!p) return false
+                  if (p.id === currentPage?.id) return false
+                  if (seen.has(p.id)) return false
+                  seen.add(p.id)
+                  return true
+                }
+              )
+              if (overlayPages.length === 0) return null
+              return (
+                <Layer>
+                  {overlayPages.flatMap((pg) =>
+                    pg.elements.map((el) => {
+                      const effEl = applyParamOverrides(el, paramOverrides)
+                      return (
+                        <PreviewElement
+                          key={el.id}
+                          element={effEl}
+                          onHotspotClick={handleHotspot}
+                          visible
+                          pageKey={pg.id}
+                        />
+                      )
+                    })
+                  )}
+                </Layer>
+              )
+            })()}
           </Stage>
         ) : (
           <div className="text-slate-700 text-sm">
@@ -1223,13 +2050,51 @@ function PlayerShell({
             style={filterStyle}
           />
         )}
-        {toast && (
-          <IosToast
-            key={toast.data.id}
-            toast={toast.data}
-            durationMs={toast.durationMs}
-            onDone={() => setToast(null)}
-          />
+        {toasts.length > 0 && (
+          // Wrapper double pour que les toasts (HTML overlay positionnés
+          // en coords canvas natives) s'alignent exactement avec la zone
+          // Konva. Sans ça, sur les hôtes où canvasScale ≠ 1 ou où la
+          // viewport est plus large que le device (Mac Catalyst, large
+          // iPad letterboxed), les toasts apparaissent en haut-gauche de
+          // la fenêtre et à la mauvaise échelle. Cf. PreviewShell qui
+          // applique exactement le même pattern.
+          //   - flex-centré (extérieur) : matche le centrage du Stage
+          //   - boîte canvasW × canvasH (milieu) : trace la zone Stage
+          //   - scaled à canvasScale, top-left origin (intérieur) :
+          //     les toasts utilisent leurs coords canvas brutes
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+            <div
+              className="relative"
+              style={{ width: canvasW, height: canvasH }}
+            >
+              <div
+                className="absolute top-0 left-0"
+                style={{
+                  width: app.resolution.width,
+                  height: app.resolution.height,
+                  transform: `scale(${canvasScale})`,
+                  transformOrigin: 'top left',
+                }}
+              >
+                {toasts.map((t) => (
+                  <IosToast
+                    key={t.data.id}
+                    toast={t.data}
+                    // Tap sur la carte : ferme ce toast et appelle son
+                    // onTap si défini (composé via buildToastOnTap depuis
+                    // l'élément source).
+                    onClick={() => {
+                      const f = t.onTap
+                      dismissToast(t.data.id)
+                      f?.()
+                    }}
+                    durationMs={t.durationMs}
+                    onDone={() => dismissToast(t.data.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
         )}
         {showExplanations &&
           !explanationDismissed &&
@@ -1249,7 +2114,25 @@ function PlayerShell({
       <Header
         appName={app.name}
         sequence={app.sequence}
-        onPlay={() => setMode('playing')}
+        onPlay={() => {
+          setMode('playing')
+          // Demande le fullscreen au passage en mode playing. Doit être
+          // synchrone dans le click handler (gesture user requis par les
+          // navigateurs). Échoue silencieusement sur iOS Safari mobile
+          // qui ne supporte pas la Fullscreen API.
+          const el = document.documentElement as HTMLElement & {
+            webkitRequestFullscreen?: () => Promise<void>
+          }
+          const req = el.requestFullscreen ?? el.webkitRequestFullscreen
+          if (req) {
+            try {
+              const p = req.call(el)
+              if (p && typeof p.catch === 'function') p.catch(() => {})
+            } catch {
+              // Ignore — pas de fullscreen disponible (iOS, contexte non-secure, etc.)
+            }
+          }
+        }}
       />
 
       <main className="flex-1 overflow-y-auto px-6 py-5">
@@ -1285,6 +2168,7 @@ function PlayerShell({
                 return next
               })
             }
+            onResetAll={() => setParamOverrides({})}
           />
         )}
       </main>
@@ -1313,9 +2197,19 @@ function Header({
   onPlay: () => void
 }) {
   return (
-    <header className="relative bg-slate-950 text-white px-5 pt-4 pb-5 flex-shrink-0 overflow-hidden">
-      {/* Dot pattern en fond pour le côté premium, même signature que
-          l'InfoPanel de l'aperçu partagé. */}
+    <header
+      className="relative bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900 text-white px-6 pt-9 pb-7 flex-shrink-0 overflow-hidden"
+      style={{
+        // Safe-area pour status bar (pt-9 inclut déjà ~36px de padding,
+        // on additionne env top pour repousser le contenu sous une
+        // status bar visible en cas de non-immersive). Left/right pour
+        // les notches landscape.
+        paddingTop: 'calc(2.25rem + env(safe-area-inset-top))',
+        paddingLeft: 'calc(1.5rem + env(safe-area-inset-left))',
+        paddingRight: 'calc(1.5rem + env(safe-area-inset-right))',
+      }}
+    >
+      {/* Dot pattern de fond — signature visuelle premium PB. */}
       <div
         className="absolute inset-0 pointer-events-none opacity-[0.08]"
         style={{
@@ -1324,29 +2218,48 @@ function Header({
           backgroundSize: '16px 16px',
         }}
       />
+      {/* Halo radial sky en haut-droite pour donner un point lumineux
+          sans surcharger — accent brand discret. */}
+      <div
+        className="absolute -top-16 -right-16 w-72 h-72 rounded-full pointer-events-none opacity-30 blur-3xl"
+        style={{
+          background:
+            'radial-gradient(circle, rgba(56,189,248,0.45) 0%, transparent 70%)',
+        }}
+      />
       <div className="relative flex items-end justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-medium tracking-[0.18em] uppercase text-slate-400 truncate mb-1.5">
+          <div className="text-[10.5px] font-semibold tracking-[0.22em] uppercase text-slate-400 truncate mb-2">
             Séquence
           </div>
-          <div className="text-5xl font-extrabold leading-none tabular-nums">
+          <div className="text-[64px] font-extrabold leading-none tabular-nums tracking-tight">
             {sequence || '—'}
           </div>
-          <div className="text-sm font-medium text-slate-200 mt-2 truncate">
+          <div className="text-[14px] font-medium text-slate-200/90 mt-3 truncate">
             {appName}
           </div>
         </div>
         <button
           onClick={onPlay}
           title="Lancer l'application"
-          className="group relative inline-flex items-center justify-center gap-2 pl-4 pr-5 h-11 rounded-full bg-white text-slate-900 font-semibold text-sm shadow-[0_6px_20px_-6px_rgb(255_255_255_/_0.45)] hover:shadow-[0_10px_28px_-6px_rgb(255_255_255_/_0.6)] hover:-translate-y-0.5 active:translate-y-0 transition-all"
+          className="group relative inline-flex items-center justify-center gap-2.5 pl-4 pr-5 h-12 rounded-full bg-white text-slate-900 font-semibold text-[14px] shadow-[0_10px_30px_-8px_rgb(255_255_255_/_0.45),0_0_0_1px_rgb(255_255_255_/_0.08)] hover:shadow-[0_16px_40px_-8px_rgb(56_189_248_/_0.55),0_0_0_1px_rgb(255_255_255_/_0.15)] hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all duration-200"
         >
-          <span className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center">
+          {/* Halo gradient subtle qui apparaît au hover pour un côté
+              premium "le bouton brille". */}
+          <span
+            aria-hidden
+            className="absolute inset-0 rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none"
+            style={{
+              background:
+                'radial-gradient(circle at 30% 30%, rgba(56,189,248,0.18), transparent 60%)',
+            }}
+          />
+          <span className="relative w-7 h-7 rounded-full bg-gradient-to-br from-slate-900 to-slate-700 text-white flex items-center justify-center shadow-[inset_0_1px_0_rgb(255_255_255_/_0.15)]">
             <svg viewBox="0 0 24 24" className="w-3 h-3 fill-current translate-x-[1px]">
               <path d="M8 5v14l11-7z" />
             </svg>
           </span>
-          Lancer
+          <span className="relative">Lancer</span>
         </button>
       </div>
     </header>
@@ -1363,7 +2276,19 @@ function TabBar({
   onChange: (t: Tab) => void
 }) {
   return (
-    <nav className="flex-shrink-0 border-t border-slate-200 bg-white flex">
+    <nav
+      className="flex-shrink-0 border-t border-slate-200 bg-white flex"
+      style={{
+        // viewport-fit=cover laisse le content sous les barres système.
+        // Sans padding-bottom safe-area, sur Android portrait le nav bar
+        // (pill ou 3 boutons) chevauche la TabBar. En landscape c'est
+        // pareil pour right/left selon la rotation. On padde les 3 côtés
+        // pertinents — top jamais nécessaire (Header s'occupe du status).
+        paddingBottom: 'env(safe-area-inset-bottom)',
+        paddingLeft: 'env(safe-area-inset-left)',
+        paddingRight: 'env(safe-area-inset-right)',
+      }}
+    >
       <TabButton
         label="Infos"
         active={active === 'infos'}
@@ -1535,6 +2460,15 @@ function InfosTab({
           />
         </label>
       </div>
+
+      <div className="mt-4 rounded-xl border border-sky-200/70 bg-sky-50/60 px-4 py-3">
+        <p className="text-[12px] leading-relaxed text-sky-900/85">
+          <span className="font-semibold">Astuce :</span> à n&rsquo;importe quel
+          moment, tapez 3 fois avec 3 doigts (sur téléphone) ou appuyez sur la
+          touche <kbd className="rounded border border-sky-300 bg-white px-1 text-[10px] font-mono text-sky-900">Échap</kbd> (sur ordinateur)
+          pour afficher cette fenêtre.
+        </p>
+      </div>
     </section>
   )
 }
@@ -1622,6 +2556,7 @@ function EditionTab({
   paramOverrides,
   onChangeOverride,
   onResetOverride,
+  onResetAll,
 }: {
   paramBindings: PlayerParamBindingRef[]
   paramOverrides: ParamOverrides
@@ -1636,7 +2571,26 @@ function EditionTab({
     ownerId: string,
     field: string
   ) => void
+  onResetAll: () => void
 }) {
+  const hasAnyOverride = Object.keys(paramOverrides).length > 0
+
+  // Regroupe les bindings par (kind + nom case-insensitive) — plusieurs
+  // champs portant le même label se présentent comme UN SEUL contrôle qui
+  // édite toutes les valeurs en cascade. C'est ce que l'auteur attend
+  // quand il réutilise un même label (ex. "Heure") sur plusieurs notifs.
+  // Mirror du dedup côté PreviewShell de l'éditeur.
+  const groups = useMemo(() => {
+    const map = new Map<string, PlayerParamBindingRef[]>()
+    for (const b of paramBindings) {
+      const key = `${b.kind}:${b.name.trim().toLowerCase()}`
+      const arr = map.get(key)
+      if (arr) arr.push(b)
+      else map.set(key, [b])
+    }
+    return Array.from(map.values())
+  }, [paramBindings])
+
   return (
     <section>
       <h1 className="text-3xl font-extrabold mb-4">Édition</h1>
@@ -1645,42 +2599,104 @@ function EditionTab({
           Aucun paramètre exposé.
         </p>
       ) : (
-        <div className="space-y-4">
-          {paramBindings.map((b) => {
-            const override = paramOverrides[b.ownerId]?.[b.field]
-            const original = originalParamValue(b.item, b.field)
-            const currentValue = override !== undefined ? override : original
-            const changed = override !== undefined && override !== original
-            return (
-              <div key={`${b.scope}:${b.ownerId}.${b.field}`}>
-                <div className="flex items-baseline justify-between mb-1">
-                  <label className="text-xs font-semibold">{b.name}</label>
-                  <span className="text-[10px] text-slate-400">
-                    {b.pageName}
-                    {b.scope === 'page' && ' · page'}
-                  </span>
+        <>
+          <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
+            Vos modifications sont sauvegardées sur cet appareil et restent
+            actives à la prochaine ouverture.
+          </p>
+          <div className="space-y-4">
+            {groups.map((group) => {
+              const first = group[0]
+              const memberWithOverride = group.find(
+                (b) => paramOverrides[b.ownerId]?.[b.field] !== undefined
+              )
+              const original = originalParamValue(first.item, first.field)
+              const currentValue = memberWithOverride
+                ? paramOverrides[memberWithOverride.ownerId]![
+                    memberWithOverride.field
+                  ]
+                : original
+              const changed = group.some((b) => {
+                const ov = paramOverrides[b.ownerId]?.[b.field]
+                return (
+                  ov !== undefined &&
+                  ov !== originalParamValue(b.item, b.field)
+                )
+              })
+              const pageNames = Array.from(
+                new Set(group.map((b) => b.pageName))
+              )
+              const scopeLabel =
+                pageNames.length === 1 ? pageNames[0] : 'Plusieurs pages'
+              const isPageScope = group.every((b) => b.scope === 'page')
+              const groupKey = group
+                .map((b) => `${b.scope}:${b.ownerId}.${b.field}`)
+                .join('|')
+              return (
+                <div key={groupKey}>
+                  <div className="flex items-baseline justify-between mb-1 gap-2">
+                    <label className="text-xs font-semibold flex items-center gap-1.5">
+                      {first.name}
+                      {group.length > 1 && (
+                        <span
+                          className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200"
+                          title={`Ce label pilote ${group.length} champs`}
+                        >
+                          ×{group.length}
+                        </span>
+                      )}
+                    </label>
+                    <span className="text-[10px] text-slate-400">
+                      {scopeLabel}
+                      {isPageScope && ' · page'}
+                    </span>
+                  </div>
+                  <ParamValueInput
+                    kind={first.kind}
+                    value={currentValue}
+                    onChange={(v) => {
+                      // Propage à tous les membres du groupe pour que les
+                      // champs liés restent synchronisés.
+                      for (const b of group) {
+                        onChangeOverride(b.scope, b.ownerId, b.field, v)
+                      }
+                    }}
+                  />
+                  {changed && (
+                    <button
+                      onClick={() => {
+                        for (const b of group) {
+                          onResetOverride(b.scope, b.ownerId, b.field)
+                        }
+                      }}
+                      className="text-[10px] text-blue-500 hover:text-blue-600 mt-1"
+                    >
+                      ↺ Rétablir
+                    </button>
+                  )}
                 </div>
-                <ParamValueInput
-                  kind={b.kind}
-                  value={currentValue}
-                  onChange={(v) =>
-                    onChangeOverride(b.scope, b.ownerId, b.field, v)
+              )
+            })}
+          </div>
+          {hasAnyOverride && (
+            <div className="mt-6 pt-4 border-t border-slate-200">
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      'Réinitialiser tous les paramètres aux valeurs d’origine ?'
+                    )
+                  ) {
+                    onResetAll()
                   }
-                />
-                {changed && (
-                  <button
-                    onClick={() =>
-                      onResetOverride(b.scope, b.ownerId, b.field)
-                    }
-                    className="text-[10px] text-blue-500 hover:text-blue-600 mt-1"
-                  >
-                    ↺ Rétablir
-                  </button>
-                )}
-              </div>
-            )
-          })}
-        </div>
+                }}
+                className="text-[11px] text-slate-500 hover:text-rose-600 transition-colors"
+              >
+                ↺ Tout réinitialiser
+              </button>
+            </div>
+          )}
+        </>
       )}
     </section>
   )

@@ -16,6 +16,7 @@ import type { CanvasElement } from './types'
 import { useEntryAnimation } from './useEntryAnimation'
 import { konvaFontStyle, konvaTextDecoration } from './textFormat'
 import { registerSoundAudio, unregisterSoundAudio } from './soundRegistry'
+import { loadAnimatedImage } from './animatedImage'
 
 interface PreviewElementProps {
   element: CanvasElement
@@ -29,6 +30,11 @@ interface PreviewElementProps {
   onSwipeStart?: (el: CanvasElement, clientX: number, clientY: number) => void
   activeSwipeId?: string | null
   swipeOffset?: { x: number; y: number }
+  // Quand true, court-circuite l'entryAnimation : la page vient d'arriver
+  // via un swipe slide donc l'élément a déjà glissé avec elle, pas besoin
+  // de re-jouer un fondu/zoom. Cf. mécanisme skipPageEntryForRef côté
+  // App.tsx (mirror du PreviewShell éditeur).
+  skipEntryAnimation?: boolean
 }
 
 export function PreviewElement({
@@ -43,10 +49,11 @@ export function PreviewElement({
   onSwipeStart,
   activeSwipeId,
   swipeOffset,
+  skipEntryAnimation,
 }: PreviewElementProps) {
   // Overrides paramBindings déjà merged dans element en amont par App.tsx.
   const anim = useEntryAnimation({
-    type: element.entryAnimation,
+    type: skipEntryAnimation ? 'none' : element.entryAnimation,
     duration: element.entryDuration,
     easing: element.entryEasing,
     runKey: `${pageKey}:${visible ? 1 : 0}`,
@@ -73,10 +80,21 @@ export function PreviewElement({
       }
     : {}
 
+  // On applique l'ombre directement sur le shape Konva (alpha-shadow qui
+  // suit le contour) plutôt qu'un Rect carré blanc derrière — sinon le
+  // Rect blanc transparait à travers les zones translucides quand opacity<1
+  // (et un triangle aurait une ombre carrée).
+  const useShapeAlphaShadow = showShadow && element.type === 'shape'
+
   const inner = (() => {
     switch (element.type) {
       case 'shape':
-        return <PreviewShape element={element} />
+        return (
+          <PreviewShape
+            element={element}
+            shadowProps={useShapeAlphaShadow ? shadowKonvaProps : undefined}
+          />
+        )
       case 'text': {
         // Texte décoratif (sans action) → listening:false pour que le
         // swipe / hotspot situé en dessous reçoive le geste.
@@ -103,7 +121,12 @@ export function PreviewElement({
         )
       }
       case 'image':
-        return element.content ? <PreviewImage element={element} /> : null
+        return element.content ? (
+          <PreviewImage
+            element={element}
+            shadowProps={showShadow ? shadowKonvaProps : undefined}
+          />
+        ) : null
       case 'video':
         return element.content ? <PreviewVideo element={element} /> : null
       case 'sound':
@@ -277,6 +300,27 @@ export function PreviewElement({
   const handleEnter = needsHover ? () => setIsHovered(true) : undefined
   const handleLeave = needsHover ? () => setIsHovered(false) : undefined
   const isTextual = element.type === 'text' || element.type === 'livetext'
+  // Pour les images sans cornerRadius, l'ombre est portée par le KonvaImage
+  // (alpha-aware) — on saute le Rect d'ombre rectangulaire externe ici.
+  const useImageAlphaShadow =
+    element.type === 'image' && (element.cornerRadius ?? 0) === 0
+  // Interactivité : un élément ne capture les events que s'il est cliquable,
+  // swipable, focusable (livetext), ou s'il déclenche une action / nav. Sinon
+  // (ex. icône image décorative au-dessus d'un hotspot) on met listening=false
+  // pour que le hotspot dessous reçoive le tap. Ordre des calques = ordre des
+  // priorités : seuls les calques effectivement interactifs comptent.
+  const isInteractive =
+    element.type === 'hotspot' ||
+    element.type === 'swipe' ||
+    element.type === 'livetext' ||
+    element.type === 'button' ||
+    // Sound en mode 'zone' = hit area tactile invisible, doit recevoir
+    // les clics pour déclencher la lecture. Mode 'source' = rendu null
+    // donc isInteractive est sans effet, gardé pour clarté.
+    (element.type === 'sound' && (element.soundMode ?? 'zone') === 'zone') ||
+    needsHover ||
+    !!element.onClickAction ||
+    !!element.targetPageId
 
   return (
     <Group
@@ -287,10 +331,11 @@ export function PreviewElement({
       scaleX={anim.scale}
       scaleY={anim.scale}
       opacity={anim.opacity}
+      listening={isInteractive}
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
     >
-      {showShadow && !isTextual && (
+      {showShadow && !isTextual && !useImageAlphaShadow && !useShapeAlphaShadow && (
         <Rect
           x={element.x}
           y={element.y}
@@ -311,7 +356,13 @@ export function PreviewElement({
   )
 }
 
-function PreviewShape({ element }: { element: CanvasElement }) {
+function PreviewShape({
+  element,
+  shadowProps,
+}: {
+  element: CanvasElement
+  shadowProps?: Record<string, unknown>
+}) {
   const fill = element.color || '#3b82f6'
   const stroke = element.strokeColor || '#1e40af'
   const strokeWidth = element.strokeWidth ?? 0
@@ -321,6 +372,7 @@ function PreviewShape({ element }: { element: CanvasElement }) {
     fill,
     stroke: strokeWidth > 0 ? stroke : undefined,
     strokeWidth,
+    ...(shadowProps ?? {}),
   }
   const common = { rotation: element.rotation, opacity: element.opacity }
 
@@ -382,14 +434,15 @@ function PreviewShape({ element }: { element: CanvasElement }) {
         />
       )
     case 'line':
+      // Centered (cf. CanvasArea) : pivot au centre du bbox.
       return (
         <Line
           {...common}
-          x={element.x}
-          y={element.y}
-          points={[0, element.height / 2, element.width, element.height / 2]}
+          x={element.x + element.width / 2}
+          y={element.y + element.height / 2}
+          points={[-element.width / 2, 0, element.width / 2, 0]}
           stroke={stroke}
-          strokeWidth={Math.max(strokeWidth || 4, 1)}
+          strokeWidth={Math.max(strokeWidth ?? 4, 0.25)}
           lineCap="round"
         />
       )
@@ -398,17 +451,71 @@ function PreviewShape({ element }: { element: CanvasElement }) {
   }
 }
 
-function PreviewImage({ element }: { element: CanvasElement }) {
-  const [img, setImg] = useState<HTMLImageElement | null>(null)
+function PreviewImage({
+  element,
+  shadowProps,
+}: {
+  element: CanvasElement
+  shadowProps?: {
+    shadowColor?: string
+    shadowBlur?: number
+    shadowOffsetX?: number
+    shadowOffsetY?: number
+    shadowOpacity?: number
+  }
+}) {
+  const [img, setImg] = useState<HTMLImageElement | HTMLCanvasElement | null>(
+    null
+  )
+  const imageNodeRef = useRef<Konva.Image>(null)
   useEffect(() => {
     if (!element.content) return
-    const image = new window.Image()
-    image.src = element.content
-    image.onload = () => setImg(image)
+    let cancelled = false
+    let detach: (() => void) | null = null
+    // GIF : décodage manuel + canvas auto-animé (drawImage(<img>) ne lit pas
+    // la frame courante d'un GIF animé, quirk Canvas API universel).
+    loadAnimatedImage(element.content)
+      .then((res) => {
+        if (cancelled) {
+          res.detach()
+          return
+        }
+        detach = res.detach
+        setImg(res.source)
+      })
+      .catch(() => {
+        /* image cassée */
+      })
+    return () => {
+      cancelled = true
+      if (detach) detach()
+    }
   }, [element.content])
+
+  // rAF batchDraw : Konva ne redessine pas spontanément le canvas ; on tick
+  // rAF batchDraw UNIQUEMENT pour les GIFs animés (canvas auto-animé,
+  // cf. animatedImage.ts qui décode les frames en JS et les rend sur
+  // un HTMLCanvasElement). Les images statiques (PNG/JPEG/SVG) sont des
+  // HTMLImageElement et n'ont pas besoin de rAF — leur frame ne change
+  // jamais. Sans cette garde, sur une page avec N images, on tournait à
+  // N × 60 batchDraw/s qui redraw tout le layer Konva → freeze sur une
+  // page chargée.
+  useEffect(() => {
+    if (!img) return
+    if (!(img instanceof HTMLCanvasElement)) return
+    let raf: number
+    const tick = () => {
+      imageNodeRef.current?.getLayer()?.batchDraw()
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [img])
+
   if (!img) return null
 
   const cornerRadius = element.cornerRadius ?? 0
+  const cropShape = element.cropShape ?? 'rectangle'
   const crop =
     element.cropX !== undefined &&
     element.cropY !== undefined &&
@@ -422,13 +529,22 @@ function PreviewImage({ element }: { element: CanvasElement }) {
         }
       : undefined
 
-  const clipFunc =
-    cornerRadius > 0
-      ? (ctx: Konva.Context) => {
-          const w = element.width
-          const h = element.height
+  // Masque appliqué au rendu : rectangle (avec cornerRadius optionnel),
+  // cercle (= ellipse couvrant le bbox), ou triangle pointe en haut.
+  const needsClip = cropShape !== 'rectangle' || cornerRadius > 0
+  const clipFunc = needsClip
+    ? (ctx: Konva.Context) => {
+        const w = element.width
+        const h = element.height
+        ctx.beginPath()
+        if (cropShape === 'circle') {
+          ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2)
+        } else if (cropShape === 'triangle') {
+          ctx.moveTo(w / 2, 0)
+          ctx.lineTo(w, h)
+          ctx.lineTo(0, h)
+        } else if (cornerRadius > 0) {
           const r = Math.min(cornerRadius, w / 2, h / 2)
-          ctx.beginPath()
           ctx.moveTo(r, 0)
           ctx.lineTo(w - r, 0)
           ctx.quadraticCurveTo(w, 0, w, r)
@@ -438,9 +554,33 @@ function PreviewImage({ element }: { element: CanvasElement }) {
           ctx.quadraticCurveTo(0, h, 0, h - r)
           ctx.lineTo(0, r)
           ctx.quadraticCurveTo(0, 0, r, 0)
-          ctx.closePath()
+        } else {
+          ctx.rect(0, 0, w, h)
         }
-      : undefined
+        ctx.closePath()
+      }
+    : undefined
+
+  // Pour les icônes vectorielles lucide (iconName posé), on force un
+  // rendu CARRÉ centré dans la bbox de l'élément. iOS WKWebView ne
+  // respecte pas preserveAspectRatio quand drawImage rasterise un SVG
+  // sur canvas Konva (l'SVG est traité comme une bitmap rasterisée à
+  // sa taille naturelle puis stretchée). En contrôlant nous-mêmes les
+  // dims/offset du draw, on garantit l'aspect 1:1 partout — éditeur,
+  // web preview, app iOS — indépendamment du comportement WebKit.
+  const isLucideIcon =
+    typeof element.iconName === 'string' && element.iconName.length > 0
+  let drawX = 0
+  let drawY = 0
+  let drawW = element.width
+  let drawH = element.height
+  if (isLucideIcon) {
+    const square = Math.min(element.width, element.height)
+    drawW = square
+    drawH = square
+    drawX = (element.width - square) / 2
+    drawY = (element.height - square) / 2
+  }
 
   return (
     <Group
@@ -448,14 +588,179 @@ function PreviewImage({ element }: { element: CanvasElement }) {
       y={element.y}
       rotation={element.rotation}
       opacity={element.opacity}
-      clipFunc={clipFunc}
     >
-      <KonvaImage
-        image={img}
+      <PreviewImageInner
+        img={img}
+        drawX={drawX}
+        drawY={drawY}
+        drawW={drawW}
+        drawH={drawH}
         width={element.width}
         height={element.height}
+        cornerRadius={element.cornerRadius ?? 0}
+        cropShape={element.cropShape ?? 'rectangle'}
+        clipFunc={clipFunc}
         crop={crop}
+        shadowProps={shadowProps}
+        imageNodeRef={imageNodeRef}
       />
+    </Group>
+  )
+}
+
+// Sous-composant qui gère le rendu de l'image avec ou sans shadow.
+// Quand shadowProps est défini, on pré-rend l'image dans un canvas
+// offscreen (avec clip + crop + drawX/Y/W/H bakés) puis on pose shadow
+// directement sur KonvaImage qui utilise ce canvas en source — l'ombre
+// suit alors l'alpha du résultat (silhouette PNG transparente, rectangle
+// arrondi, cercle, triangle, icône carrée centrée). Sans shadowProps,
+// on rend en mode standard avec clipFunc + crop sur KonvaImage.
+function PreviewImageInner({
+  img,
+  drawX,
+  drawY,
+  drawW,
+  drawH,
+  width,
+  height,
+  cornerRadius,
+  cropShape,
+  clipFunc,
+  crop,
+  shadowProps,
+  imageNodeRef,
+}: {
+  img: HTMLImageElement | HTMLCanvasElement | null
+  drawX: number
+  drawY: number
+  drawW: number
+  drawH: number
+  width: number
+  height: number
+  cornerRadius: number
+  cropShape: 'rectangle' | 'circle' | 'triangle'
+  clipFunc?: (ctx: Konva.Context) => void
+  crop?: { x: number; y: number; width: number; height: number }
+  shadowProps?: {
+    shadowColor?: string
+    shadowBlur?: number
+    shadowOffsetX?: number
+    shadowOffsetY?: number
+    shadowOpacity?: number
+  }
+  imageNodeRef: React.RefObject<Konva.Image | null>
+}) {
+  const cropX = crop?.x
+  const cropY = crop?.y
+  const cropW = crop?.width
+  const cropH = crop?.height
+  // CRITIQUE : booléen stable plutôt que l'objet shadowProps directement.
+  // Le parent recrée shadowProps={...} à chaque render → identité change
+  // → useEffect re-fire → ré-alloue un canvas + setState → re-render →
+  // boucle. Cf. fix CanvasArea.tsx du même commit.
+  const hasShadow = !!shadowProps
+  const [shadowSourceCanvas, setShadowSourceCanvas] = useState<
+    HTMLCanvasElement | null
+  >(null)
+  useEffect(() => {
+    if (!img || !hasShadow || width <= 0 || height <= 0) {
+      setShadowSourceCanvas(null)
+      return
+    }
+    // DPR du device (= 2 ou 3 sur iPhone Retina), pas de minimum forcé.
+    // Le minimum à 2 testé précédemment plombait le FPS sur les
+    // animations pour zéro gain de qualité visuelle (iOS est déjà ≥2).
+    const dpr = window.devicePixelRatio || 1
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(width * dpr))
+    canvas.height = Math.max(1, Math.round(height * dpr))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      setShadowSourceCanvas(null)
+      return
+    }
+    ctx.scale(dpr, dpr)
+    const needsClip = cropShape !== 'rectangle' || cornerRadius > 0
+    if (needsClip) {
+      ctx.beginPath()
+      if (cropShape === 'circle') {
+        ctx.ellipse(width / 2, height / 2, width / 2, height / 2, 0, 0, Math.PI * 2)
+      } else if (cropShape === 'triangle') {
+        ctx.moveTo(width / 2, 0)
+        ctx.lineTo(width, height)
+        ctx.lineTo(0, height)
+      } else if (cornerRadius > 0) {
+        const r = Math.min(cornerRadius, width / 2, height / 2)
+        ctx.moveTo(r, 0)
+        ctx.lineTo(width - r, 0)
+        ctx.quadraticCurveTo(width, 0, width, r)
+        ctx.lineTo(width, height - r)
+        ctx.quadraticCurveTo(width, height, width - r, height)
+        ctx.lineTo(r, height)
+        ctx.quadraticCurveTo(0, height, 0, height - r)
+        ctx.lineTo(0, r)
+        ctx.quadraticCurveTo(0, 0, r, 0)
+      }
+      ctx.closePath()
+      ctx.clip()
+    }
+    try {
+      if (
+        cropX !== undefined &&
+        cropY !== undefined &&
+        cropW !== undefined &&
+        cropH !== undefined
+      ) {
+        ctx.drawImage(img, cropX, cropY, cropW, cropH, drawX, drawY, drawW, drawH)
+      } else {
+        ctx.drawImage(img, drawX, drawY, drawW, drawH)
+      }
+      setShadowSourceCanvas(canvas)
+    } catch {
+      setShadowSourceCanvas(null)
+    }
+  }, [
+    img,
+    hasShadow,
+    width,
+    height,
+    cornerRadius,
+    cropShape,
+    cropX,
+    cropY,
+    cropW,
+    cropH,
+    drawX,
+    drawY,
+    drawW,
+    drawH,
+  ])
+
+  if (shadowProps && shadowSourceCanvas) {
+    return (
+      <KonvaImage
+        ref={imageNodeRef}
+        image={shadowSourceCanvas}
+        width={width}
+        height={height}
+        {...shadowProps}
+      />
+    )
+  }
+
+  return (
+    <Group clipFunc={clipFunc}>
+      {img && (
+        <KonvaImage
+          ref={imageNodeRef}
+          image={img}
+          x={drawX}
+          y={drawY}
+          width={drawW}
+          height={drawH}
+          crop={crop}
+        />
+      )}
     </Group>
   )
 }
@@ -772,10 +1077,44 @@ function LiveTextPreview({
   ])
 
   const isEmpty = typed.length === 0
-  const display = typed
+  const placeholder = element.livePlaceholder ?? ''
+  const showPlaceholder =
+    isEmpty &&
+    !focused &&
+    (element.liveFocusMode ?? 'auto') === 'click' &&
+    placeholder.length > 0
+  const display = showPlaceholder ? placeholder : typed
   const fontSize = element.fontSize || 28
   const caretW = Math.max(1, Math.round(fontSize / 18))
   const caretH = fontSize * 1.05
+  // Styles effectifs : quand le placeholder est visible, on applique les
+  // overrides livePlaceholder* (couleur/poids/italique/souligné/contour).
+  // Font-family et fontSize restent toujours hérités du texte saisi.
+  const effFontStyle = showPlaceholder
+    ? konvaFontStyle({
+        bold: !!element.livePlaceholderBold,
+        italic: !!element.livePlaceholderItalic,
+      })
+    : konvaFontStyle(element)
+  const effTextDecoration = showPlaceholder
+    ? konvaTextDecoration({ underline: !!element.livePlaceholderUnderline })
+    : konvaTextDecoration(element)
+  const effFill = showPlaceholder
+    ? element.livePlaceholderColor ?? '#94a3b8'
+    : isEmpty
+      ? '#94a3b8'
+      : element.color || '#000000'
+  const effStrokeWidth = showPlaceholder
+    ? element.livePlaceholderStrokeWidth ?? 0
+    : !isEmpty
+      ? element.strokeWidth ?? 0
+      : 0
+  const effStroke =
+    effStrokeWidth > 0
+      ? showPlaceholder
+        ? element.livePlaceholderStrokeColor ?? '#1e40af'
+        : element.strokeColor ?? '#1e40af'
+      : undefined
 
   return (
     <>
@@ -799,9 +1138,12 @@ function LiveTextPreview({
         text={display}
         fontSize={fontSize}
         fontFamily={element.fontFamily || 'Arial'}
-        fontStyle={konvaFontStyle(element)}
-        textDecoration={konvaTextDecoration(element)}
-        fill={isEmpty ? '#94a3b8' : element.color || '#000000'}
+        fontStyle={effFontStyle}
+        textDecoration={effTextDecoration}
+        fill={effFill}
+        stroke={effStroke}
+        strokeWidth={effStrokeWidth}
+        fillAfterStrokeEnabled
         align={element.textAlign ?? 'left'}
         listening={false}
         {...(shadowProps ?? {})}

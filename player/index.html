@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover : permet au content d'étendre sous les barres
+         système Android/iOS, ET active env(safe-area-inset-*) en CSS
+         pour repousser les éléments interactifs (TabBar, Header) hors
+         des zones de barres. Sans ça, sur Android landscape le nav bar
+         vertical à droite chevauche l'onglet Édition. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Tauri + React + Typescript</title>
   </head>
 

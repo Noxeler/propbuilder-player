@@ -17,4 +17,13 @@ body,
 body {
   font-family: system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* Pas de sélection texte pendant le drag (sinon overlay gris bleuté
+     visible sur Mac Catalyst WKWebView quand on bouge le knob) ; pas
+     de tap-highlight noir transparent qui flash en haut du Stage sur
+     iOS quand un hotspot est tapé ; pas de menu long-press iOS qui
+     interromprait un swipe maintenu. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
 }
