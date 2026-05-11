@@ -339,18 +339,21 @@ function PlayerShell({
   // on retombe sur la même page avec la même visibility. Mirror PreviewShell.
   const [playKey, setPlayKey] = useState(0)
   useEffect(() => {
+    // Wipe les toasts à TOUT changement de mode (les deux sens). On
+    // wipe aussi à l'aller (playing → menu) en plus du retour, pour
+    // éviter que des toasts en cours résident dans le state pendant
+    // que la page de menu est affichée et se ré-injectent au pire
+    // moment (race entre setToasts([]) tardif et l'auto-fire de la
+    // page-entry, qui faisait survivre certaines notifs entre deux
+    // sessions de Play — symptôme : 'des fois la notif n'est pas
+    // reset').
+    setToasts([])
     if (mode === 'playing') {
       setPlayKey((k) => k + 1)
       // Reset les artefacts du précédent play pour repartir clean :
       // skipPageEntryForRef pourrait pointer sur la page courante depuis
       // le dernier swipe, ce qui ferait skipper l'animation au replay.
       skipPageEntryForRef.current = null
-      // Wipe les toasts encore à l'écran (notamment infinis ou rejoués
-      // via raccourci au play précédent) — sinon après 3-doigts → menu
-      // → Play, le toast ressurgissait alors qu'à t=0 du nouveau play
-      // il n'est pas censé être visible. La page-entry effect ré-arme
-      // ensuite ceux qui doivent apparaître à l'arrivée.
-      setToasts([])
       // Retourne à la page d'accueil. Sans ça, après un swipe vers une
       // page X puis 3-doigts → menu → Play, on reprenait là où on
       // s'était arrêté au lieu de rejouer le projet depuis le début.
