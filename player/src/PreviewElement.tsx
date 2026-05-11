@@ -238,61 +238,12 @@ export function PreviewElement({
               listening={false}
             />
             {!hasCustomKnob && (
-              <>
-                <Rect
-                  x={knobX}
-                  y={knobY}
-                  width={knobSize}
-                  height={knobSize}
-                  cornerRadius={knobSize / 2}
-                  fillLinearGradientStartPoint={{ x: 0, y: 0 }}
-                  fillLinearGradientEndPoint={{ x: 0, y: knobSize }}
-                  fillLinearGradientColorStops={[
-                    0,
-                    '#ffffff',
-                    0.5,
-                    '#f1f5f9',
-                    1,
-                    '#cbd5e1',
-                  ]}
-                  stroke="#94a3b8"
-                  strokeWidth={0.75}
-                  shadowColor="rgba(0,0,0,0.45)"
-                  shadowBlur={knobSize * 0.25}
-                  shadowOffsetY={knobSize * 0.06}
-                  shadowOpacity={0.6}
-                  listening={false}
-                />
-                <Rect
-                  x={knobX + knobSize * 0.18}
-                  y={knobY + knobSize * 0.08}
-                  width={knobSize * 0.64}
-                  height={knobSize * 0.28}
-                  cornerRadius={knobSize * 0.14}
-                  fillLinearGradientStartPoint={{ x: 0, y: 0 }}
-                  fillLinearGradientEndPoint={{ x: 0, y: knobSize * 0.28 }}
-                  fillLinearGradientColorStops={[
-                    0,
-                    'rgba(255,255,255,0.85)',
-                    1,
-                    'rgba(255,255,255,0)',
-                  ]}
-                  listening={false}
-                />
-                <Arrow
-                  x={knobX}
-                  y={knobY}
-                  points={arrowPts}
-                  stroke="#1f2937"
-                  fill="#1f2937"
-                  strokeWidth={Math.max(2, knobSize * 0.09)}
-                  pointerLength={knobSize * 0.22}
-                  pointerWidth={knobSize * 0.26}
-                  lineCap="round"
-                  lineJoin="round"
-                  listening={false}
-                />
-              </>
+              <SwipeKnob
+                x={knobX}
+                y={knobY}
+                size={knobSize}
+                arrowPts={arrowPts}
+              />
             )}
             {hitRect}
           </>
@@ -363,6 +314,116 @@ export function PreviewElement({
         />
       )}
       {inner}
+    </Group>
+  )
+}
+
+// Knob de swipe (style 'knob') — 4 nodes Konva composés (rond gradient,
+// highlight, arrow, shadow). Rendu dans un Group cached à mount pour
+// éviter la re-rasterisation à chaque frame pendant que l'utilisateur
+// drag (knobX/knobY = Group.x/y → Konva translate seulement la bitmap
+// cachée, sans re-peindre le contenu).
+//
+// Sans ce caching, le stroke 0.75px ultra-fin + la shadow rasterisaient
+// à des positions sub-pixel (Stage.scaleX fractionnaire) à chaque rAF
+// → flicker très visible sur le knob lui-même côté natif Android.
+function SwipeKnob({
+  x,
+  y,
+  size,
+  arrowPts,
+}: {
+  x: number
+  y: number
+  size: number
+  arrowPts: number[]
+}) {
+  const groupRef = useRef<Konva.Group>(null)
+  useEffect(() => {
+    const node = groupRef.current
+    if (!node) return
+    // Padding cache = shadow blur + offset + marge. Sans ça la shadow
+    // se fait clipper au bord du rect de cache.
+    const shadowBlur = size * 0.25
+    const shadowOff = size * 0.06
+    const pad = Math.ceil(shadowBlur + shadowOff + 4)
+    node.cache({
+      x: -pad,
+      y: -pad,
+      width: size + pad * 2,
+      height: size + pad * 2,
+      pixelRatio: 2,
+    })
+    node.getLayer()?.batchDraw()
+    return () => {
+      try {
+        node.clearCache()
+      } catch {
+        /* node déjà unmount */
+      }
+    }
+    // arrowPts est un tableau de nombres — on join() pour comparer par
+    // valeur dans les deps. Re-cache si la direction du swipe change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size, arrowPts.join(',')])
+
+  return (
+    <Group ref={groupRef} x={x} y={y} listening={false}>
+      <Rect
+        x={0}
+        y={0}
+        width={size}
+        height={size}
+        cornerRadius={size / 2}
+        fillLinearGradientStartPoint={{ x: 0, y: 0 }}
+        fillLinearGradientEndPoint={{ x: 0, y: size }}
+        fillLinearGradientColorStops={[
+          0,
+          '#ffffff',
+          0.5,
+          '#f1f5f9',
+          1,
+          '#cbd5e1',
+        ]}
+        stroke="#94a3b8"
+        strokeWidth={0.75}
+        shadowColor="rgba(0,0,0,0.45)"
+        shadowBlur={size * 0.25}
+        shadowOffsetY={size * 0.06}
+        shadowOpacity={0.6}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+        listening={false}
+      />
+      <Rect
+        x={size * 0.18}
+        y={size * 0.08}
+        width={size * 0.64}
+        height={size * 0.28}
+        cornerRadius={size * 0.14}
+        fillLinearGradientStartPoint={{ x: 0, y: 0 }}
+        fillLinearGradientEndPoint={{ x: 0, y: size * 0.28 }}
+        fillLinearGradientColorStops={[
+          0,
+          'rgba(255,255,255,0.85)',
+          1,
+          'rgba(255,255,255,0)',
+        ]}
+        listening={false}
+      />
+      <Arrow
+        x={0}
+        y={0}
+        points={arrowPts}
+        stroke="#1f2937"
+        fill="#1f2937"
+        strokeWidth={Math.max(2, size * 0.09)}
+        pointerLength={size * 0.22}
+        pointerWidth={size * 0.26}
+        lineCap="round"
+        lineJoin="round"
+        listening={false}
+      />
     </Group>
   )
 }
