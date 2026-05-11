@@ -1194,6 +1194,54 @@ function LiveTextPreview({
         : element.strokeColor ?? '#1e40af'
       : undefined
 
+  // Cache du Text en bitmap quand une shadow est attachée. Sans ça,
+  // chaque redraw du layer (caret blink toutes les 500ms, drag d'un
+  // autre élément à 60fps, GIF, etc.) re-rasterise le texte+shadow à
+  // des positions sub-pixel (Stage.scaleX fractionnaire) → artefacts
+  // statiques permanents sur les glyphes du 9:45 et autres livetexts.
+  // Avec cache, Konva translate la bitmap baked → plus de drift.
+  // Re-cache quand le contenu change (ex: 9:45 → 9:46) ou les styles.
+  useEffect(() => {
+    if (!shadowProps || Object.keys(shadowProps).length === 0) return
+    const node = textRef.current
+    if (!node) return
+    const blur = Number(shadowProps.shadowBlur ?? 0)
+    const offX = Math.abs(Number(shadowProps.shadowOffsetX ?? 0))
+    const offY = Math.abs(Number(shadowProps.shadowOffsetY ?? 0))
+    const pad = Math.ceil(blur + Math.max(offX, offY) + 8)
+    try {
+      node.cache({
+        x: -pad,
+        y: -pad,
+        width: element.width + pad * 2,
+        height: element.height + pad * 2,
+      })
+      node.getLayer()?.batchDraw()
+    } catch {
+      /* cache peut échouer si dims invalides — fallback rendu live */
+    }
+    return () => {
+      try {
+        node.clearCache()
+      } catch {
+        /* déjà unmount */
+      }
+    }
+  }, [
+    shadowProps,
+    display,
+    fontSize,
+    effFill,
+    effStroke,
+    effStrokeWidth,
+    effFontStyle,
+    effTextDecoration,
+    element.width,
+    element.height,
+    element.fontFamily,
+    element.textAlign,
+  ])
+
   return (
     <>
       <Rect
