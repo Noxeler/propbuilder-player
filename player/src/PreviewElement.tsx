@@ -116,6 +116,17 @@ export function PreviewElement({
             fill={element.color || '#000000'}
             align={element.textAlign ?? 'left'}
             listening={hasTextAction}
+            // perfectDrawEnabled=false + shadowForStrokeEnabled=false
+            // sont les flags officiels Konva qui éliminent les pixels
+            // orphelins autour des glyphes quand on a une shadow. Le
+            // 1er coupe l'optimisation 2-passes qui rasterise le glyph
+            // 2x à des positions sub-pixel (visible quand le Stage est
+            // scaled à un facteur fractionnaire, typique côté mobile).
+            // Le 2e évite que l'ombre soit appliquée 2 fois (une pour
+            // fill, une pour stroke) → moitié du flicker en moins quand
+            // un redraw 60fps tourne (swipe knob, GIF, caret livetext).
+            perfectDrawEnabled={false}
+            shadowForStrokeEnabled={false}
             {...shadowKonvaProps}
           />
         )
@@ -372,6 +383,12 @@ function PreviewShape({
     fill,
     stroke: strokeWidth > 0 ? stroke : undefined,
     strokeWidth,
+    // Mêmes flags anti-artefacts que sur Text — fundamentaux pour les
+    // shapes avec shadow (typique d'un knob/bouton stylisé) qui se
+    // redraw à chaque frame quand le swipe est dragué. Élimine les
+    // pixels orphelins autour du bord du shape pendant l'animation.
+    perfectDrawEnabled: false,
+    shadowForStrokeEnabled: false,
     ...(shadowProps ?? {}),
   }
   const common = { rotation: element.rotation, opacity: element.opacity }
@@ -1146,6 +1163,11 @@ function LiveTextPreview({
         fillAfterStrokeEnabled
         align={element.textAlign ?? 'left'}
         listening={false}
+        // Mêmes flags que sur le Text statique — éliminent les pixels
+        // orphelins quand le layer se redraw 60fps (caret blink ici,
+        // ou drag de knob ailleurs sur la page).
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
         {...(shadowProps ?? {})}
       />
       {focused && cursorVisible && caret && !isEmpty && (
