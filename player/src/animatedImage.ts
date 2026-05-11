@@ -157,11 +157,26 @@ export async function loadAnimatedImage(
   src: string,
   blobHint?: Blob
 ): Promise<LoadedAnimated> {
-  // On a besoin du blob pour parser le GIF. Si pas fourni, on fetch le src.
+  // Fast-path : si la source ne peut PAS être un GIF animé (data URL
+  // non-GIF, ou URL avec extension claire non-GIF), on saute le détour
+  // fetch+blob et on file direct sur <img src>. Sous Tauri Android,
+  // fetch() peut silencieusement échouer pour des data URLs longs ou
+  // pour le scheme custom Tauri là où <img src> accepte sans broncher
+  // — cette voie évite ces faux négatifs (image jamais chargée, donc
+  // wallpaper invisible côté natif).
+  if (!blobHint && !isPotentialGif(src)) {
+    return loadAsImageElement(src)
+  }
+
   let blob = blobHint
   if (!blob) {
-    const res = await fetch(src)
-    blob = await res.blob()
+    try {
+      const res = await fetch(src)
+      blob = await res.blob()
+    } catch {
+      // fetch a échoué (Tauri quirk, CORS, etc.) — fallback <img> direct
+      return loadAsImageElement(src)
+    }
   }
 
   if (await looksLikeGif(blob)) {
@@ -188,6 +203,18 @@ export async function loadAnimatedImage(
 
   // Fallback : HTMLImageElement classique (PNG, JPEG, WebP statique, GIF
   // mono-frame, ou GIF qu'on n'a pas su parser).
+  return loadAsImageElement(src)
+}
+
+function isPotentialGif(src: string): boolean {
+  if (src.startsWith('data:')) {
+    return src.startsWith('data:image/gif')
+  }
+  const cleaned = src.split(/[?#]/)[0].toLowerCase()
+  return cleaned.endsWith('.gif')
+}
+
+async function loadAsImageElement(src: string): Promise<LoadedAnimated> {
   const img = await new Promise<HTMLImageElement>((resolve, reject) => {
     const el = new Image()
     el.onload = () => resolve(el)

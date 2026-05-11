@@ -195,11 +195,21 @@ async function loadAllFonts(project: Project): Promise<void> {
     appendGoogleFontLink(family)
   }
 
-  // Attendre que les FontFace inline soient prêts. On n'attend pas les
-  // Google Fonts (chargés via <link>) — `display=swap` gère ça côté CSS,
-  // les éléments s'afficheront avec un fallback puis flip dès que la
-  // police est dispo.
+  // Attendre que les FontFace inline soient prêts.
   await Promise.all(customLoads)
+  // Puis attendre les Google Fonts (chargées via <link>). Konva mesure les
+  // textes au draw, mais ne re-render PAS spontanément quand une police
+  // arrive plus tard via display=swap → l'horloge / les knobs initiaux
+  // sont peints avec un fallback aux métriques différentes, puis la
+  // vraie police swap et laisse des pixels orphelins (artefacts noirs
+  // visibles sur les chiffres « 9:45 » côté natif). En attendant que
+  // document.fonts.ready résolve avant le premier setProject, on garantit
+  // un render Konva final avec les bonnes métriques de police d'entrée.
+  try {
+    await document.fonts.ready
+  } catch {
+    /* navigateurs très anciens : on ignore et on rend avec le fallback */
+  }
 }
 
 function App() {
