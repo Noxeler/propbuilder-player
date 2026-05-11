@@ -290,6 +290,24 @@ jobs:
       - name: Install Bubblewrap CLI
         run: npm install -g @bubblewrap/cli@latest
 
+      - name: Pre-configure Bubblewrap (skip JDK/SDK install prompts)
+        run: |
+          # Bubblewrap stocke ses paths JDK+SDK dans ~/.bubblewrap/config.json.
+          # Sans ce fichier, il demande interactivement "Do you want
+          # Bubblewrap to install the JDK?" au 1er run et bloque le job.
+          # On lui pointe sur ce que setup-java + setup-android ont installé.
+          mkdir -p "$HOME/.bubblewrap"
+          # JAVA_HOME est exporté par actions/setup-java
+          # ANDROID_HOME est exporté par android-actions/setup-android
+          cat > "$HOME/.bubblewrap/config.json" <<EOF
+          {
+            "jdkPath": "${JAVA_HOME}",
+            "androidSdkPath": "${ANDROID_HOME}"
+          }
+          EOF
+          echo "  jdkPath        = ${JAVA_HOME}"
+          echo "  androidSdkPath = ${ANDROID_HOME}"
+
       - name: Restore keystore from secret
         env:
           KEYSTORE_B64: ${{ secrets.TWA_KEYSTORE_BASE64 }}
