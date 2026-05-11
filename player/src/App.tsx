@@ -468,6 +468,11 @@ function PlayerShell({
     for (const el of currentPage.elements) {
       if (el.hidden) continue
       if (el.type === 'toast') {
+        // hidden=true : élément masqué globalement par le user (toggle
+        // œil dans le panneau Calques). On respecte côté toast aussi —
+        // sinon le toast continuait à se déclencher au délai même si
+        // l'auteur l'a explicitement masqué de l'aperçu.
+        if (el.hidden) continue
         // hiddenInitially : le toast n'apparaît pas tout seul au
         // démarrage de la page — il attend d'être déclenché via un
         // onClickAction, un raccourci clavier ou une TriggerAction

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import {
   Group,
   Rect,
@@ -339,7 +339,11 @@ function SwipeKnob({
   arrowPts: number[]
 }) {
   const groupRef = useRef<Konva.Group>(null)
-  useEffect(() => {
+  // useLayoutEffect (pas useEffect) : on cache avant le 1er paint
+  // navigateur pour qu'on ne voit pas l'instant fugace où le knob
+  // est rendu en mode "shadow non-cachée" (frame d'artefact avant
+  // que le cache batchDraw prenne effet).
+  useLayoutEffect(() => {
     const node = groupRef.current
     if (!node) return
     // Padding cache = shadow blur + offset + marge. Sans ça la shadow
@@ -1200,8 +1204,16 @@ function LiveTextPreview({
   // des positions sub-pixel (Stage.scaleX fractionnaire) → artefacts
   // statiques permanents sur les glyphes du 9:45 et autres livetexts.
   // Avec cache, Konva translate la bitmap baked → plus de drift.
+  //
+  // useLayoutEffect (pas useEffect) : le cache doit être posé AVANT
+  // que Konva ait dessiné le premier frame du Text — sinon on voit
+  // une fraction de seconde le rendu sub-pixel artefacté avant que
+  // le redraw post-cache prenne effet. Layout effects run après le
+  // commit React mais avant le paint navigateur → cache + batchDraw
+  // → 1er frame visible déjà clean.
+  //
   // Re-cache quand le contenu change (ex: 9:45 → 9:46) ou les styles.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!shadowProps || Object.keys(shadowProps).length === 0) return
     const node = textRef.current
     if (!node) return
