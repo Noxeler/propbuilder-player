@@ -18,6 +18,7 @@ import {
   applyParamOverrides,
   applyPageParamOverrides,
   getEffectiveParamBindings,
+  isBindingFieldActive,
   paramFieldKind,
   originalParamValue,
   type ParamOverrides,
@@ -644,6 +645,7 @@ function PlayerShell({
       // Page-level
       const pageBindings = getEffectiveParamBindings(page)
       for (const [field, meta] of Object.entries(pageBindings)) {
+        if (!isBindingFieldActive(page, field)) continue
         out.push({
           pageName: page.name,
           scope: 'page',
@@ -657,6 +659,7 @@ function PlayerShell({
       for (const el of page.elements) {
         const bindings = getEffectiveParamBindings(el)
         for (const [field, meta] of Object.entries(bindings)) {
+          if (!isBindingFieldActive(el, field)) continue
           out.push({
             pageName: page.name,
             scope: 'element',
