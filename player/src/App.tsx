@@ -464,6 +464,12 @@ function PlayerShell({
     for (const el of currentPage.elements) {
       if (el.hidden) continue
       if (el.type === 'toast') {
+        // hiddenInitially : le toast n'apparaît pas tout seul au
+        // démarrage de la page — il attend d'être déclenché via un
+        // onClickAction, un raccourci clavier ou une TriggerAction
+        // depuis un autre élément. Évite le cas frustrant où plusieurs
+        // toasts à délai=0 s'empilent à t=0.
+        if (el.hiddenInitially) continue
         // En arrivée par slide, on skip les toasts à appearDelay aussi
         // (ils auraient déjà fait leur entrée pendant le drag).
         if (arrivedViaSlide && (el.appearDelay ?? 0) > 0) continue
