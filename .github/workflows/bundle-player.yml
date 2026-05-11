@@ -210,16 +210,49 @@ jobs:
             '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
             "$CONF" > tmp.json && mv tmp.json "$CONF"
 
-      - name: Generate .icns from custom icon (if any)
+      # create-dmg : DMG avec fond custom Tahoe-compatible (Tauri 2.10 ignore
+      # silencieusement bundle.macOS.dmg, cf. tentative ratée 1a85680).
+      # librsvg : SVG → PNG pour le fond généré par app + fallback icône.
+      - name: Install create-dmg + librsvg
+        run: brew install create-dmg librsvg
+
+      - name: Generate .icns (from iconDataUrl, else fallback from app name)
         working-directory: player/public
         run: |
           ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' project.json)
-          if [ -z "$ICON_DATA" ]; then
-            echo "Pas d'icône custom, on garde celle de Tauri par défaut."
-            exit 0
-          fi
+          NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
           ICON_TMP=$(mktemp -d)
-          echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > "$ICON_TMP/src.png"
+
+          if [ -n "$ICON_DATA" ]; then
+            echo "→ Décodage iconDataUrl du project.json…"
+            if ! echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > "$ICON_TMP/src.png" 2>/dev/null; then
+              echo "  ⚠ base64 illisible — fallback SVG."
+              ICON_DATA=""
+            fi
+          fi
+
+          if [ -z "$ICON_DATA" ]; then
+            echo "→ Pas d'iconDataUrl — génération fallback depuis « $NAME »…"
+            INITIALS=$(LC_ALL=fr_FR.UTF-8 awk '{n=0; for (i=1;i<=NF;i++) {c=substr($i,1,1); if (c ~ /[A-Za-zÀ-ÿ]/) {out=out toupper(c); n++; if (n==2) break}} print out}' <<< "$NAME")
+            [ -z "$INITIALS" ] && INITIALS="A"
+            cat > "$ICON_TMP/src.svg" <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+            <defs>
+              <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#3f3f46"/>
+                <stop offset="100%" stop-color="#09090b"/>
+              </linearGradient>
+            </defs>
+            <rect width="1024" height="1024" rx="225" fill="url(#bg)"/>
+            <text x="512" y="650" text-anchor="middle"
+                  font-family="-apple-system, BlinkMacSystemFont, system-ui, sans-serif"
+                  font-size="460" font-weight="600" fill="#fafafa">${INITIALS}</text>
+          </svg>
+          EOF
+            rsvg-convert -w 1024 -h 1024 "$ICON_TMP/src.svg" -o "$ICON_TMP/src.png"
+            echo "  ✓ Initiales « $INITIALS »"
+          fi
+
           ICONSET="$ICON_TMP/icon.iconset"
           mkdir -p "$ICONSET"
           for size in 16 32 128 256 512; do
@@ -257,27 +290,126 @@ jobs:
           echo "Identities available for signing:"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
-      # Notarization via app-specific password (Apple ID + app-specific password
-      # generated at appleid.apple.com — same pattern as the local Viewer build).
-      - name: Build DMG (universal, signed + notarized if cert present)
+      # Tauri ne fait QUE le .app signé (--bundles app). On orchestre le DMG
+      # nous-mêmes via create-dmg ensuite — Tauri 2.10 ignore bundle.macOS.dmg
+      # et son bundler interne ne produit pas un .DS_Store Tahoe-compatible
+      # (bg invisible sur macOS 26.x). create-dmg + Finder AppleScript fait
+      # écrire le .DS_Store par Finder → format reconnu sur Tahoe.
+      - name: Build .app (universal, signed if cert present)
         working-directory: player
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.NOTARYTOOL_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
-        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app
+
+      - name: Locate .app
+        id: find_app
+        run: |
+          APP=$(find player/src-tauri/target -path "*/release/bundle/macos/*.app" -maxdepth 7 -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::Aucun .app produit"
+            find player/src-tauri/target -name "*.app" -maxdepth 7 || true
+            exit 1
+          fi
+          APP_NAME=$(basename "$APP" .app)
+          echo "Found .app: $APP"
+          echo "path=$APP" >> "$GITHUB_OUTPUT"
+          echo "name=$APP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build DMG with custom background (create-dmg + Finder AppleScript)
+        id: build_dmg
+        env:
+          APP_PATH: ${{ steps.find_app.outputs.path }}
+          APP_NAME: ${{ steps.find_app.outputs.name }}
+        run: |
+          # Génère le PNG de fond 540×360 spécifique à l'app — charcoal +
+          # grille blueprint + nom de l'app en header + flèche → entre l'icône
+          # app (140, 180) et le shortcut Applications (400, 180) + hint en bas.
+          BG_TMP=$(mktemp -d)
+          SAFE=$(echo "$APP_NAME" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+          SAFE_UPPER=$(LC_ALL=fr_FR.UTF-8 awk '{print toupper($0)}' <<< "$SAFE")
+          cat > "$BG_TMP/bg.svg" <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="540" height="360" viewBox="0 0 540 360">
+            <defs>
+              <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+                <path d="M36 0 L0 0 0 36" stroke="#27272a" stroke-width="0.5" fill="none"/>
+              </pattern>
+            </defs>
+            <rect width="540" height="360" fill="#18181b"/>
+            <rect width="540" height="360" fill="url(#grid)"/>
+            <text x="270" y="62" text-anchor="middle"
+                  font-family="-apple-system, BlinkMacSystemFont, system-ui, sans-serif"
+                  font-size="13" font-weight="500" letter-spacing="6" fill="#71717a">${SAFE_UPPER}</text>
+            <line x1="225" y1="180" x2="315" y2="180" stroke="#52525b" stroke-width="2"/>
+            <polyline points="300,168 320,180 300,192" fill="none" stroke="#52525b"
+                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <text x="270" y="312" text-anchor="middle"
+                  font-family="-apple-system, BlinkMacSystemFont, system-ui, sans-serif"
+                  font-size="11.5" fill="#a1a1aa">Glissez l'application vers le dossier Applications</text>
+          </svg>
+          EOF
+          rsvg-convert -w 540 -h 360 "$BG_TMP/bg.svg" -o "$BG_TMP/bg.png"
+
+          DMG_OUT="$BG_TMP/${APP_NAME}.dmg"
+          create-dmg \
+            --volname "$APP_NAME" \
+            --background "$BG_TMP/bg.png" \
+            --window-pos 200 120 \
+            --window-size 540 360 \
+            --icon-size 96 \
+            --icon "${APP_NAME}.app" 140 180 \
+            --hide-extension "${APP_NAME}.app" \
+            --app-drop-link 400 180 \
+            --no-internet-enable \
+            "$DMG_OUT" "$APP_PATH"
+
+          if [ ! -f "$DMG_OUT" ]; then
+            echo "::error::create-dmg a échoué"
+            exit 1
+          fi
+          echo "DMG : $DMG_OUT ($(du -h "$DMG_OUT" | cut -f1))"
+          echo "path=$DMG_OUT" >> "$GITHUB_OUTPUT"
+
+      # Sign + notarize le DMG (Tauri ne le fait plus puisqu'on est passé à
+      # --bundles app). Skip silencieusement si pas de cert / pas de creds —
+      # le DMG reste utilisable mais Gatekeeper affichera un warning.
+      - name: Sign + notarize DMG
+        env:
+          DMG_PATH: ${{ steps.build_dmg.outputs.path }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARYTOOL_APP_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+        run: |
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "::warning::APPLE_SIGNING_IDENTITY manquant — DMG NON signé NON notarized"
+            exit 0
+          fi
+          echo "→ codesign DMG…"
+          codesign --sign "$SIGNING_IDENTITY" --timestamp "$DMG_PATH"
+          if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_PASSWORD" ] || [ -z "$NOTARY_TEAM_ID" ]; then
+            echo "::warning::Creds notarytool manquants — DMG signé mais NON notarized"
+            exit 0
+          fi
+          echo "→ notarytool submit (peut prendre 2-10 min)…"
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
 
       - name: Locate DMG
         id: find_dmg
+        env:
+          DMG_PATH: ${{ steps.build_dmg.outputs.path }}
         run: |
-          DMG=$(find player/src-tauri/target -name "*.dmg" | head -1)
-          if [ -z "$DMG" ]; then
-            echo "No DMG produced"
+          if [ ! -f "$DMG_PATH" ]; then
+            echo "::error::DMG introuvable à $DMG_PATH"
             exit 1
           fi
-          echo "Found DMG: $DMG ($(du -h "$DMG" | cut -f1))"
-          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          echo "DMG final : $DMG_PATH ($(du -h "$DMG_PATH" | cut -f1))"
+          echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Set up SSH to VPS
         uses: webfactory/ssh-agent@v0.9.0
