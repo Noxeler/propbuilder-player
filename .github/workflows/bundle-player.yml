@@ -39,9 +39,20 @@ jobs:
   # ---------------------------------------------------------------------------
   # ANDROID
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # ANDROID APK — Capacitor (WebView Chromium native). Depuis 2026-05-13 on
+  # n'utilise plus Tauri pour Android (APK 120 MB pour 60 fps moins fluide
+  # que la WebView native). Capacitor → APK ~10–15 MB, runtime = Chrome
+  # WebView du device (toujours à jour via Play Store), pas de runtime
+  # embarqué. Pas besoin de Rust ni de NDK.
+  #
+  # Mirror du `scripts/build-player-local-android-capacitor.sh` côté repo
+  # principal PropBuilder, sans la partie rsync VPS via SSH local (le
+  # workflow utilise les secrets VPS_SSH_KEY).
+  # ---------------------------------------------------------------------------
   android:
     if: contains(inputs.platforms, 'android')
-    name: Android APK
+    name: Android APK (Capacitor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,17 +73,10 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125'
+          packages: 'platforms;android-34 build-tools;34.0.0'
 
-      - name: Set up Rust (Android arm64 target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: player/src-tauri
+      - name: Install librsvg + imagemagick
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin imagemagick
 
       - name: Install Player dependencies
         working-directory: player
@@ -91,82 +95,59 @@ jobs:
           jq --arg app "${APP_SLUG}" '.project | .apps |= map(select(.slug == $app or .id == $app))' raw.json > project.json
           rm raw.json
           echo "Fetched project.json for ${APP_SLUG} ($(wc -c < project.json) bytes)"
-          WIDTH=$(jq -r '.apps[0].resolution.width // 900' project.json)
-          HEIGHT=$(jq -r '.apps[0].resolution.height // 1000' project.json)
           NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
-          echo "Window size: ${WIDTH}x${HEIGHT}, title: ${NAME}"
-          CONF=../src-tauri/tauri.conf.json
-          jq --argjson w "$WIDTH" --argjson h "$HEIGHT" --arg n "$NAME" \
-            '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
-            "$CONF" > tmp.json && mv tmp.json "$CONF"
+          echo "App name = $NAME"
 
-      - name: Install librsvg (for SVG fallback icon)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin imagemagick
-
-      - name: Generate icons (from iconDataUrl, else fallback from app name)
-        working-directory: player/public
+      - name: Extract launcher icon (iconDataUrl base64 → PNG)
         run: |
-          ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' project.json)
-          NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
+          ICON_DATA=$(jq -r '.apps[0].iconDataUrl // empty' player/public/project.json)
+          NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' player/public/project.json)
           mkdir -p /tmp/icongen
           SRC=/tmp/icongen/src.png
-
           if [ -n "$ICON_DATA" ]; then
-            echo "→ Décodage iconDataUrl pour Android…"
+            echo "→ Décodage iconDataUrl…"
             if ! echo "$ICON_DATA" | sed -E 's#^data:image/[^;]+;base64,##' | base64 -d > "$SRC" 2>/dev/null; then
-              echo "  ⚠ base64 illisible — fallback SVG."
+              echo "  ⚠ base64 illisible — fallback initiales."
               ICON_DATA=""
             fi
           fi
-
           if [ -z "$ICON_DATA" ]; then
-            echo "→ Pas d'iconDataUrl — génération fallback depuis « $NAME »"
             INITIALS=$(LC_ALL=fr_FR.UTF-8 awk '{n=0; for (i=1;i<=NF;i++) {c=substr($i,1,1); if (c ~ /[A-Za-zÀ-ÿ]/) {out=out toupper(c); n++; if (n==2) break}} print out}' <<< "$NAME")
             [ -z "$INITIALS" ] && INITIALS="A"
             cat > /tmp/icongen/src.svg <<EOF
           <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-            <defs>
-              <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stop-color="#3f3f46"/>
-                <stop offset="100%" stop-color="#09090b"/>
-              </linearGradient>
-            </defs>
-            <rect width="1024" height="1024" rx="225" fill="url(#bg)"/>
+            <rect width="1024" height="1024" rx="225" fill="#1f1d1a"/>
             <text x="512" y="650" text-anchor="middle"
                   font-family="DejaVu Sans, sans-serif"
                   font-size="460" font-weight="600" fill="#fafafa">${INITIALS}</text>
           </svg>
           EOF
             rsvg-convert -w 1024 -h 1024 /tmp/icongen/src.svg -o "$SRC"
-            echo "  ✓ Initiales « $INITIALS »"
+            echo "  ✓ fallback initiales « $INITIALS »"
           fi
+          echo "ICON_SRC=$SRC" >> "$GITHUB_ENV"
 
-          convert "$SRC" -resize 512x512 ../src-tauri/icons/icon.png
-          convert "$SRC" -resize 128x128 ../src-tauri/icons/128x128.png
-          convert "$SRC" -resize 256x256 ../src-tauri/icons/128x128@2x.png
-          convert "$SRC" -resize 32x32 ../src-tauri/icons/32x32.png
-          echo "Icônes Tauri remplacées ($(du -h "$SRC" | cut -f1))"
-
-      - name: Init Tauri Android project
+      - name: Vite build (player/dist)
         working-directory: player
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
-        run: npm run tauri android init
+        run: npm run build
 
-      # Tauri 2 `android init` régénère les mipmap launcher depuis son
-      # template interne (logo Tauri bleu/jaune) — il ignore icons/icon.png.
-      # On overwrite les 5 densités Android avec notre icône custom AVANT
-      # le build, sinon l'APK sort avec le logo Tauri partout sur le
-      # launcher Android.
-      - name: Overwrite Android mipmaps with custom icon
+      - name: Capacitor add android
         working-directory: player
+        run: npx cap add android
+
+      - name: Patch strings.xml with app name
         run: |
-          ICON_SRC=src-tauri/icons/icon.png
-          RES=src-tauri/gen/android/app/src/main/res
-          if [ ! -f "$ICON_SRC" ] || [ ! -d "$RES" ]; then
-            echo "::warning::Icon source ou res dir absent — skip mipmap overwrite"
-            exit 0
+          NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' player/public/project.json)
+          STRINGS_XML=player/android/app/src/main/res/values/strings.xml
+          if [ -f "$STRINGS_XML" ]; then
+            ESCAPED_NAME=$(echo "$NAME" | sed -e 's/&/\&amp;/g' -e "s/'/\\\\'/g")
+            sed -i -E "s|(<string name=\"app_name\">)[^<]*(</string>)|\1$ESCAPED_NAME\2|" "$STRINGS_XML"
+            sed -i -E "s|(<string name=\"title_activity_main\">)[^<]*(</string>)|\1$ESCAPED_NAME\2|" "$STRINGS_XML"
           fi
+
+      - name: Replace mipmap launcher icons with project icon
+        run: |
+          RES=player/android/app/src/main/res
           for entry in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
             IFS=: read -r density launcher_sz fg_sz <<< "$entry"
             dir="$RES/mipmap-$density"
@@ -175,67 +156,119 @@ jobs:
             convert "$ICON_SRC" -resize "${launcher_sz}x${launcher_sz}" "$dir/ic_launcher_round.png"
             convert "$ICON_SRC" -resize "${fg_sz}x${fg_sz}" "$dir/ic_launcher_foreground.png"
           done
-          echo "✓ mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher*.png remplacées"
+          echo "✓ mipmaps remplacés"
 
-      # Patch MainActivity.kt pour immersive sticky (hide status + nav bars).
-      # Tauri 2 init ne met que enableEdgeToEdge → contenu sous les barres
-      # mais barres visibles. WindowInsetsController.hide(systemBars) cache
-      # vraiment.
-      - name: Patch MainActivity.kt — immersive sticky
-        working-directory: player
+      - name: Patch MainActivity.java (immersive sticky + KEEP_SCREEN_ON)
         run: |
-          MAIN_ACTIVITY=$(find src-tauri/gen/android/app/src/main/java -name "MainActivity.kt" | head -1)
+          MAIN_ACTIVITY=$(find player/android/app/src/main/java -name "MainActivity.java" 2>/dev/null | head -1)
+          [ -z "$MAIN_ACTIVITY" ] && MAIN_ACTIVITY=$(find player/android/app/src/main/java -name "MainActivity.kt" 2>/dev/null | head -1)
           if [ -z "$MAIN_ACTIVITY" ]; then
-            echo "::warning::MainActivity.kt introuvable — skip immersive patch"
+            echo "::warning::MainActivity introuvable — skip immersive patch"
             exit 0
           fi
-          PKG=$(awk '/^package /{print $2; exit}' "$MAIN_ACTIVITY")
+          PKG=$(awk '/^package /{gsub(/;/,"",$2); print $2; exit}' "$MAIN_ACTIVITY")
           cat > "$MAIN_ACTIVITY" <<EOF
-          package $PKG
+          package $PKG;
 
-          import android.os.Bundle
-          import androidx.activity.enableEdgeToEdge
-          import androidx.core.view.WindowCompat
-          import androidx.core.view.WindowInsetsCompat
-          import androidx.core.view.WindowInsetsControllerCompat
+          import android.os.Bundle;
+          import android.view.WindowManager;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
+          import com.getcapacitor.BridgeActivity;
 
-          class MainActivity : TauriActivity() {
-            override fun onCreate(savedInstanceState: Bundle?) {
-              enableEdgeToEdge()
-              super.onCreate(savedInstanceState)
-              applyImmersive()
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              super.onCreate(savedInstanceState);
+              getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+              applyImmersive();
             }
 
-            override fun onWindowFocusChanged(hasFocus: Boolean) {
-              super.onWindowFocusChanged(hasFocus)
-              if (hasFocus) applyImmersive()
+            @Override
+            public void onWindowFocusChanged(boolean hasFocus) {
+              super.onWindowFocusChanged(hasFocus);
+              if (hasFocus) applyImmersive();
             }
 
-            private fun applyImmersive() {
-              WindowCompat.setDecorFitsSystemWindows(window, false)
-              val controller = WindowInsetsControllerCompat(window, window.decorView)
-              controller.hide(WindowInsetsCompat.Type.systemBars())
-              controller.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            private void applyImmersive() {
+              WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+              WindowInsetsControllerCompat controller =
+                  new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
+              controller.hide(WindowInsetsCompat.Type.systemBars());
+              controller.setSystemBarsBehavior(
+                  WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
           }
           EOF
-          echo "✓ MainActivity.kt patched ($MAIN_ACTIVITY)"
+          echo "✓ MainActivity patched ($MAIN_ACTIVITY)"
 
-      - name: Build Android APK (debug, arm64 only)
+      - name: PropBuilder splash drawable (logo + label) — Android 12+
+        run: |
+          # Le splash SVG vit dans player/public/. Si désynchronisé avec le
+          # repo principal (le SVG n'est pas encore push ici), on skip.
+          SPLASH_SVG=player/public/splash-icon-propbuilder.svg
+          if [ ! -f "$SPLASH_SVG" ]; then
+            echo "::warning::$SPLASH_SVG absent — splash PropBuilder skip"
+            exit 0
+          fi
+          for entry in mdpi:192 hdpi:288 xhdpi:384 xxhdpi:576 xxxhdpi:768; do
+            IFS=: read -r density size <<< "$entry"
+            dir="player/android/app/src/main/res/drawable-$density"
+            mkdir -p "$dir"
+            rsvg-convert -w "$size" -h "$size" "$SPLASH_SVG" -o "$dir/splash_icon.png"
+          done
+          DRAWABLE_DIR=player/android/app/src/main/res/drawable
+          mkdir -p "$DRAWABLE_DIR"
+          find player/android/app/src/main/res -type f -path "*drawable*/splash.png" -delete 2>/dev/null || true
+          cat > "$DRAWABLE_DIR/splash.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+            <item><color android:color="#0a0a0a"/></item>
+            <item><bitmap android:src="@drawable/splash_icon" android:gravity="center"/></item>
+          </layer-list>
+          XML
+          mkdir -p player/android/app/src/main/res/values-v31
+          cat > player/android/app/src/main/res/values-v31/styles.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <style name="AppTheme.NoActionBarLaunch" parent="AppTheme.NoActionBar">
+              <item name="android:windowSplashScreenBackground">#0a0a0a</item>
+              <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
+            </style>
+          </resources>
+          XML
+          cat > player/android/app/src/main/res/values/styles.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+              <item name="android:background">@null</item>
+            </style>
+            <style name="AppTheme.NoActionBar" parent="AppTheme">
+              <item name="windowActionBar">false</item>
+              <item name="windowNoTitle">true</item>
+            </style>
+            <style name="AppTheme.NoActionBarLaunch" parent="AppTheme.NoActionBar">
+              <item name="android:windowBackground">@drawable/splash</item>
+            </style>
+          </resources>
+          XML
+          echo "✓ splash PropBuilder + thèmes patchés"
+
+      - name: Capacitor copy (sync web assets)
         working-directory: player
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
-        run: npm run tauri android build -- --apk --debug --target aarch64
+        run: npx cap copy android
+
+      - name: Gradle assembleDebug
+        working-directory: player/android
+        run: ./gradlew assembleDebug
 
       - name: Locate APK
         id: find_apk
         run: |
-          APK=$(find player -name "*.apk" -path "*/outputs/*" | head -1)
+          APK=$(find player/android -name "*.apk" -path "*/outputs/*" | head -1)
           if [ -z "$APK" ]; then
-            echo "No APK produced"
-            find player -name "*.apk" || true
-            exit 1
+            echo "No APK produced"; find player/android -name "*.apk" || true; exit 1
           fi
           echo "Found APK: $APK ($(du -h "$APK" | cut -f1))"
           echo "path=$APK" >> "$GITHUB_OUTPUT"
@@ -256,8 +289,6 @@ jobs:
           SLUG: ${{ inputs.slug }}
           APP_SLUG: ${{ inputs.app_slug }}
         run: |
-          # Wipe ONLY le player-android.apk précédent — pas tout le player-*
-          # (sinon un build Android écraserait un .dmg/.exe issus d'un autre job).
           ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG} && rm -f ${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
           rsync -avz "${APK_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/${SLUG}/${APP_SLUG}/player-android.apk"
 
