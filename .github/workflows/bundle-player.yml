@@ -89,8 +89,11 @@ jobs:
           APP_SLUG: ${{ inputs.app_slug }}
           SHARE_TOKEN: ${{ inputs.share_token }}
         run: |
-          QS=""
-          if [ -n "${SHARE_TOKEN}" ]; then QS="?share=${SHARE_TOKEN}"; fi
+          # inlineMedia=1 : le serveur remplace les mediaId par des data URLs
+          # inline → le player Konva embarqué (offline) affiche wallpapers +
+          # images de la bibliothèque média (sinon zones blanches).
+          QS="?inlineMedia=1"
+          if [ -n "${SHARE_TOKEN}" ]; then QS="${QS}&share=${SHARE_TOKEN}"; fi
           curl -sSf "https://propbuilder.noxelstudio.com/api/public/preview/${SLUG}/${APP_SLUG}${QS}" -o raw.json
           jq --arg app "${APP_SLUG}" '.project | .apps |= map(select(.slug == $app or .id == $app))' raw.json > project.json
           rm raw.json
@@ -543,8 +546,11 @@ jobs:
           APP_SLUG: ${{ inputs.app_slug }}
           SHARE_TOKEN: ${{ inputs.share_token }}
         run: |
-          QS=""
-          if [ -n "${SHARE_TOKEN}" ]; then QS="?share=${SHARE_TOKEN}"; fi
+          # inlineMedia=1 : le serveur remplace les mediaId par des data URLs
+          # inline → le player Konva embarqué (offline) affiche wallpapers +
+          # images de la bibliothèque média (sinon zones blanches).
+          QS="?inlineMedia=1"
+          if [ -n "${SHARE_TOKEN}" ]; then QS="${QS}&share=${SHARE_TOKEN}"; fi
           curl -sSf "https://propbuilder.noxelstudio.com/api/public/preview/${SLUG}/${APP_SLUG}${QS}" -o raw.json
           jq --arg app "${APP_SLUG}" '.project | .apps |= map(select(.slug == $app or .id == $app))' raw.json > project.json
           rm raw.json
@@ -831,8 +837,11 @@ jobs:
           APP_SLUG: ${{ inputs.app_slug }}
           SHARE_TOKEN: ${{ inputs.share_token }}
         run: |
-          QS=""
-          if [ -n "${SHARE_TOKEN}" ]; then QS="?share=${SHARE_TOKEN}"; fi
+          # inlineMedia=1 : le serveur remplace les mediaId par des data URLs
+          # inline → le player Konva embarqué (offline) affiche wallpapers +
+          # images de la bibliothèque média (sinon zones blanches).
+          QS="?inlineMedia=1"
+          if [ -n "${SHARE_TOKEN}" ]; then QS="${QS}&share=${SHARE_TOKEN}"; fi
           curl -sSf "https://propbuilder.noxelstudio.com/api/public/preview/${SLUG}/${APP_SLUG}${QS}" -o raw.json
           jq --arg app "${APP_SLUG}" '.project | .apps |= map(select(.slug == $app or .id == $app))' raw.json > project.json
           rm raw.json
