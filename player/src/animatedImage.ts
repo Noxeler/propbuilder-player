@@ -157,6 +157,17 @@ export async function loadAnimatedImage(
   src: string,
   blobHint?: Blob
 ): Promise<LoadedAnimated> {
+  // SVG sans width/height intrinsèques : invisible en webview natif.
+  // Un <svg viewBox="0 0 24 24"> SANS attributs width/height a une taille
+  // intrinsèque nulle dans WKWebView (macOS dmg) et indéterminée dans
+  // WebView2 (Windows exe) → naturalWidth/Height = 0 → Konva.drawImage ne
+  // dessine rien. Le navigateur de bureau (éditeur) tombe sur la taille
+  // par défaut des replaced elements (300×150) et affiche quand même, d'où
+  // la divergence éditeur OK / build natif KO. On injecte width/height
+  // depuis le viewBox AVANT le chargement pour garantir une taille positive
+  // partout. (Le picker d'icônes pose déjà size=128 explicite ; ce filet
+  // couvre les SVG custom posés en `content` brut, ex. glyphes FindIt.)
+  src = ensureSvgIntrinsicSize(src)
   // Stratégie de chargement par taille/type :
   //  - Petite source (data URL < 100 KB) ET pas un GIF : voie directe
   //    <img src=...>. Le plus rapide, marche partout.
@@ -233,6 +244,45 @@ export async function loadAnimatedImage(
     URL.revokeObjectURL(objUrl)
     throw err
   }
+}
+
+// Décode un SVG data URL, et si la balise <svg> racine n'a pas de
+// width/height explicites, les injecte depuis le viewBox (fallback 24×24).
+// Renvoie un data URL réencodé, ou le src d'origine si rien à faire / pas
+// un SVG. Bornes : on ne touche QUE la balise ouvrante <svg ...>, pas le
+// contenu interne. Supporte les variantes ;base64 et url-encodée.
+function ensureSvgIntrinsicSize(src: string): string {
+  if (!src.startsWith('data:image/svg+xml')) return src
+  const comma = src.indexOf(',')
+  if (comma < 0) return src
+  const meta = src.slice(5, comma)
+  const data = src.slice(comma + 1)
+  let svg: string
+  try {
+    svg = /;base64/i.test(meta) ? atob(data) : decodeURIComponent(data)
+  } catch {
+    return src
+  }
+  const open = svg.match(/<svg\b[^>]*>/i)
+  if (!open) return src
+  const openTag = open[0]
+  const hasWidth = /\bwidth\s*=/i.test(openTag)
+  const hasHeight = /\bheight\s*=/i.test(openTag)
+  if (hasWidth && hasHeight) return src
+  let w = '24'
+  let h = '24'
+  const vb = openTag.match(
+    /viewBox\s*=\s*["']\s*[\d.+-]+\s+[\d.+-]+\s+([\d.+-]+)\s+([\d.+-]+)\s*["']/i
+  )
+  if (vb) {
+    w = vb[1]
+    h = vb[2]
+  }
+  let newTag = openTag
+  if (!hasWidth) newTag = newTag.replace(/<svg\b/i, `<svg width="${w}"`)
+  if (!hasHeight) newTag = newTag.replace(/<svg\b/i, `<svg height="${h}"`)
+  const newSvg = svg.replace(openTag, newTag)
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(newSvg)
 }
 
 function isPotentialGif(src: string): boolean {
