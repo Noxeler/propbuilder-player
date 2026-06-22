@@ -866,17 +866,25 @@ jobs:
           magick /tmp/src.png -define icon:auto-resize=256,128,64,32,16 ../src-tauri/icons/icon.ico
           echo "Custom icon applied."
 
-      - name: Build EXE (NSIS installer, unsigned)
+      # --no-bundle : on ne package PAS d'installeur NSIS/MSI. Tauri compile
+      # quand même le binaire .exe avec les assets frontend EMBARQUÉS dedans
+      # → c'est un exécutable portable autonome (double-clic, aucune install).
+      # Seule dépendance runtime : WebView2, préinstallé sur Windows 11 et la
+      # plupart des Windows 10 à jour.
+      - name: Build EXE (portable, unsigned)
         working-directory: player
-        run: npm run tauri build -- --bundles nsis
+        run: npm run tauri build -- --no-bundle
 
       - name: Locate EXE
         id: find_exe
         shell: bash
         run: |
-          EXE=$(find player/src-tauri/target -name "*-setup.exe" | head -1)
+          # Le binaire portable est à la racine de release/ (maxdepth 1) — les
+          # autres .exe (scripts de build) vivent plus profond dans release/build/.
+          EXE=$(find player/src-tauri/target/release -maxdepth 1 -name "*.exe" | head -1)
           if [ -z "$EXE" ]; then
-            echo "No installer produced"
+            echo "No portable exe produced"
+            find player/src-tauri/target -name "*.exe" -maxdepth 4 || true
             exit 1
           fi
           echo "Found EXE: $EXE ($(du -h "$EXE" | cut -f1))"
