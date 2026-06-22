@@ -553,8 +553,13 @@ jobs:
           HEIGHT=$(jq -r '.apps[0].resolution.height // 1000' project.json)
           NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
           CONF=../src-tauri/tauri.conf.json
-          jq --argjson w "$WIDTH" --argjson h "$HEIGHT" --arg n "$NAME" \
-            '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
+          # productName = nom de l'.exe (NSIS) et de l'.app : Windows/macOS
+          # interdisent  / \ : * ? " < > |  (cf. regex Tauri ^[^/:*?"<>|]+$).
+          # On les remplace par un espace ; le titre de fenêtre garde le nom complet.
+          PNAME=$(printf '%s' "$NAME" | sed -E 's#[/\\:*?"<>|]+# #g; s/  +/ /g; s/^ +//; s/ +$//')
+          [ -z "$PNAME" ] && PNAME="PropBuilder Player"
+          jq --argjson w "$WIDTH" --argjson h "$HEIGHT" --arg n "$NAME" --arg pn "$PNAME" \
+            '.productName = $pn | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
             "$CONF" > tmp.json && mv tmp.json "$CONF"
 
       # create-dmg : DMG avec fond custom Tahoe-compatible (Tauri 2.10 ignore
@@ -835,8 +840,13 @@ jobs:
           HEIGHT=$(jq -r '.apps[0].resolution.height // 1000' project.json)
           NAME=$(jq -r '.apps[0].name // "PropBuilder Player"' project.json)
           CONF=../src-tauri/tauri.conf.json
-          jq --argjson w "$WIDTH" --argjson h "$HEIGHT" --arg n "$NAME" \
-            '.productName = $n | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
+          # productName = nom de l'.exe (NSIS) et de l'.app : Windows/macOS
+          # interdisent  / \ : * ? " < > |  (cf. regex Tauri ^[^/:*?"<>|]+$).
+          # On les remplace par un espace ; le titre de fenêtre garde le nom complet.
+          PNAME=$(printf '%s' "$NAME" | sed -E 's#[/\\:*?"<>|]+# #g; s/  +/ /g; s/^ +//; s/ +$//')
+          [ -z "$PNAME" ] && PNAME="PropBuilder Player"
+          jq --argjson w "$WIDTH" --argjson h "$HEIGHT" --arg n "$NAME" --arg pn "$PNAME" \
+            '.productName = $pn | .app.windows[0].title = $n | .app.windows[0].width = $w | .app.windows[0].height = $h' \
             "$CONF" > tmp.json && mv tmp.json "$CONF"
 
       - name: Generate icons from custom icon (if any)
