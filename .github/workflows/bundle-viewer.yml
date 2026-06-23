@@ -51,6 +51,13 @@ jobs:
         working-directory: player
         run: npm ci
 
+      # Icône PropBuilder Viewer (Play outline, identique aux Viewers iOS/
+      # Android/Mac) — tauri icon génère icon.ico / icon.png / pngs dans
+      # src-tauri/icons/ depuis le 1024×1024. Autonome (pas d'imagemagick).
+      - name: Generate Viewer icons
+        working-directory: player
+        run: npm run tauri -- icon src-tauri/viewer-icon.png
+
       - name: Patch tauri.conf.json for the Viewer
         working-directory: player/src-tauri
         shell: bash
@@ -134,6 +141,13 @@ jobs:
       - name: Install Player dependencies
         working-directory: player
         run: npm ci
+
+      # Icône PropBuilder Viewer (Play outline, identique aux Viewers iOS/
+      # Android/Mac) — tauri icon génère icon.ico / icon.png / pngs dans
+      # src-tauri/icons/ depuis le 1024×1024. Autonome (pas d'imagemagick).
+      - name: Generate Viewer icons
+        working-directory: player
+        run: npm run tauri -- icon src-tauri/viewer-icon.png
 
       - name: Patch tauri.conf.json for the Viewer
         working-directory: player/src-tauri

@@ -4,8 +4,8 @@
 // de rouvrir les apps récemment ouvertes. Au clic, remonte un ViewerLink au
 // parent (ViewerApp dans App.tsx) qui fait le fetch + cache + rendu.
 //
-// UI Tailwind (Tailwind v4 présent dans le player). Pas de fetch ici : ce
-// composant ne fait que parser le lien et lister les récents.
+// DA alignée sur ViewerLandingPage / la famille Viewer : charcoal monochrome
+// (clap), accents MONO, grille blueprint en filigrane, bouton brushed-plate.
 import { useState } from 'react'
 import {
   parseViewerLink,
@@ -16,6 +16,20 @@ import {
   type RecentApp,
 } from './viewerLib'
 
+// Palette cinema clap (identique à ViewerLandingPage.tsx).
+const C = {
+  bg: '#0a0a0a',
+  bg2: '#0f0f0f',
+  card: '#141414',
+  border: '#262626',
+  borderHi: '#404040',
+  ink: '#f5f5f4',
+  inkMuted: '#a8a29e',
+  inkDim: '#78716c',
+  white: '#fafaf9',
+}
+const MONO = "ui-monospace, 'SF Mono', Menlo, 'JetBrains Mono', monospace"
+
 export function Launcher({ onOpen }: { onOpen: (link: ViewerLink) => void }) {
   const [input, setInput] = useState('')
   const [err, setErr] = useState<string | null>(null)
@@ -25,7 +39,7 @@ export function Launcher({ onOpen }: { onOpen: (link: ViewerLink) => void }) {
     const link = parseViewerLink(input)
     if (!link) {
       setErr(
-        'Lien invalide. Collez un lien de partage PropBuilder (commençant par https://…/v/ ou …/project/).'
+        'Lien invalide. Collez un lien de partage PropBuilder (https://…/v/… ou …/project/…).'
       )
       return
     }
@@ -34,30 +48,75 @@ export function Launcher({ onOpen }: { onOpen: (link: ViewerLink) => void }) {
   }
 
   const openRecent = (r: RecentApp) => onOpen(recentToLink(r))
-
-  const drop = (r: RecentApp) =>
-    setRecents(removeRecent(r.slug, r.appSlug))
+  const drop = (r: RecentApp) => setRecents(removeRecent(r.slug, r.appSlug))
 
   return (
-    <div className="min-h-screen w-screen overflow-auto bg-slate-950 text-slate-100">
-      <div className="mx-auto flex min-h-screen max-w-2xl flex-col px-6 py-10">
-        {/* En-tête */}
-        <div className="mb-8 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 text-lg font-bold text-white">
-            P
+    <div
+      className="min-h-screen w-screen overflow-auto"
+      style={{
+        background: C.bg,
+        color: C.ink,
+        fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+      }}
+    >
+      {/* Filigrane blueprint (identique à ViewerLandingPage) */}
+      <div
+        className="fixed inset-0 pointer-events-none"
+        style={{
+          backgroundImage:
+            'linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.018) 1px, transparent 1px)',
+          backgroundSize: '64px 64px',
+          maskImage:
+            'radial-gradient(ellipse at center, rgba(0,0,0,0.55), transparent 70%)',
+          WebkitMaskImage:
+            'radial-gradient(ellipse at center, rgba(0,0,0,0.55), transparent 70%)',
+        }}
+      />
+
+      <div className="relative mx-auto flex min-h-screen max-w-2xl flex-col px-6 py-14">
+        {/* En-tête : plaque brossée + triangle play (rappel icône Viewer) */}
+        <div className="mb-12 flex items-center gap-4">
+          <div
+            className="flex h-12 w-12 items-center justify-center rounded-2xl"
+            style={{
+              background: 'linear-gradient(180deg, #f5f5f4 0%, #d6d3d1 100%)',
+              boxShadow:
+                '0 12px 28px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.4)',
+            }}
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="#0a0a0a" strokeWidth="2" strokeLinejoin="round">
+              <path d="M7 5v14l11-7z" />
+            </svg>
           </div>
           <div>
-            <div className="text-base font-semibold">PropBuilder Viewer</div>
-            <div className="text-xs text-slate-400">
-              Ouvrez n'importe quelle app depuis son lien de partage
+            <div style={{ fontWeight: 600, fontSize: 17, color: C.ink }}>
+              PropBuilder Viewer
+            </div>
+            <div
+              style={{
+                fontFamily: MONO,
+                fontSize: 10,
+                letterSpacing: '0.22em',
+                color: C.inkDim,
+              }}
+            >
+              OUVREZ N'IMPORTE QUELLE APP PAR SON LIEN
             </div>
           </div>
         </div>
 
         {/* Champ lien */}
-        <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-          Lien de partage
-        </label>
+        <div
+          style={{
+            fontFamily: MONO,
+            fontSize: 10,
+            letterSpacing: '0.22em',
+            color: C.inkDim,
+          }}
+          className="mb-3"
+        >
+          LIEN DE PARTAGE
+        </div>
         <div className="flex gap-2">
           <input
             value={input}
@@ -71,72 +130,124 @@ export function Launcher({ onOpen }: { onOpen: (link: ViewerLink) => void }) {
             placeholder="https://propbuilder.noxelstudio.com/v/…"
             spellCheck={false}
             autoFocus
-            className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+            className="min-w-0 flex-1 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+            style={{
+              background: C.bg2,
+              border: `1px solid ${C.border}`,
+              color: C.ink,
+            }}
+            onFocus={(e) => (e.currentTarget.style.borderColor = C.borderHi)}
+            onBlur={(e) => (e.currentTarget.style.borderColor = C.border)}
           />
           <button
             onClick={submit}
             disabled={!input.trim()}
-            className="shrink-0 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+            className="shrink-0 rounded-xl px-6 py-3 font-semibold transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+            style={{
+              background: 'linear-gradient(180deg, #f5f5f4 0%, #d6d3d1 100%)',
+              color: '#0a0a0a',
+              boxShadow: '0 8px 20px rgba(0,0,0,0.4)',
+            }}
           >
             Ouvrir
           </button>
         </div>
-        {err && <p className="mt-2 text-xs text-red-400">{err}</p>}
-        <p className="mt-2 text-xs text-slate-500">
+        {err && (
+          <p className="mt-2 text-xs" style={{ color: '#f87171' }}>
+            {err}
+          </p>
+        )}
+        <p className="mt-3 text-xs leading-relaxed" style={{ color: C.inkDim }}>
           Copiez le lien depuis l'éditeur PropBuilder (bouton Partager) ou
           l'email « Version prête ». La 1ʳᵉ ouverture nécessite Internet ;
           ensuite l'app fonctionne hors-ligne.
         </p>
 
         {/* Récents */}
-        <div className="mt-10 flex-1">
-          <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-            Apps récentes
-          </div>
-          {recents.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-800 px-4 py-10 text-center text-sm text-slate-500">
-              Aucune app encore ouverte. Collez un lien ci-dessus pour
-              commencer.
-            </div>
-          ) : (
-            <ul className="space-y-2">
-              {recents.map((r) => (
-                <li
-                  key={`${r.slug}/${r.appSlug}`}
-                  className="group flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 transition-colors hover:border-slate-600"
-                >
-                  <button
-                    onClick={() => openRecent(r)}
-                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                  >
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-sm font-semibold text-slate-300">
-                      {(r.name || '?').slice(0, 1).toUpperCase()}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-slate-100">
-                        {r.name}
-                      </div>
-                      <div className="truncate text-xs text-slate-500">
-                        {r.slug}
-                      </div>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => drop(r)}
-                    aria-label="Retirer de la liste"
-                    title="Retirer de la liste"
-                    className="shrink-0 rounded-md px-2 py-1 text-slate-500 opacity-0 transition-opacity hover:text-slate-200 group-hover:opacity-100"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+        <div
+          style={{
+            fontFamily: MONO,
+            fontSize: 10,
+            letterSpacing: '0.22em',
+            color: C.inkDim,
+          }}
+          className="mb-3 mt-12"
+        >
+          APPS RÉCENTES
         </div>
+        {recents.length === 0 ? (
+          <div
+            className="rounded-2xl px-4 py-10 text-center text-sm"
+            style={{
+              border: `1px dashed ${C.border}`,
+              color: C.inkDim,
+            }}
+          >
+            Aucune app encore ouverte. Collez un lien ci-dessus pour commencer.
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {recents.map((r) => (
+              <li
+                key={`${r.slug}/${r.appSlug}`}
+                className="group flex items-center gap-3 rounded-2xl px-4 py-3 transition-colors"
+                style={{ background: C.bg2, border: `1px solid ${C.border}` }}
+                onMouseEnter={(e) =>
+                  (e.currentTarget.style.borderColor = C.borderHi)
+                }
+                onMouseLeave={(e) =>
+                  (e.currentTarget.style.borderColor = C.border)
+                }
+              >
+                <button
+                  onClick={() => openRecent(r)}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                >
+                  <div
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm font-semibold"
+                    style={{ background: C.card, color: C.inkMuted }}
+                  >
+                    {(r.name || '?').slice(0, 1).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <div
+                      className="truncate text-sm font-medium"
+                      style={{ color: C.ink }}
+                    >
+                      {r.name}
+                    </div>
+                    <div
+                      className="truncate"
+                      style={{ fontFamily: MONO, fontSize: 11, color: C.inkDim }}
+                    >
+                      {r.slug}
+                    </div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => drop(r)}
+                  aria-label="Retirer de la liste"
+                  title="Retirer de la liste"
+                  className="shrink-0 rounded-md px-2 py-1 opacity-0 transition-opacity group-hover:opacity-100"
+                  style={{ color: C.inkDim }}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
 
-        <div className="mt-8 text-center text-[11px] text-slate-600">
-          PropBuilder Viewer
+        <div
+          className="mt-10 text-center"
+          style={{
+            fontFamily: MONO,
+            fontSize: 10,
+            letterSpacing: '0.18em',
+            color: C.inkDim,
+          }}
+        >
+          © NOXEL STUDIO
         </div>
       </div>
     </div>
