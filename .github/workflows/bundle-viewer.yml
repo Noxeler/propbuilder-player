@@ -1,0 +1,183 @@
+# Build du PropBuilder Viewer DESKTOP (Windows + Linux).
+#
+# Différent de bundle-player.yml (qui bake un project.json par app) : ici on
+# construit l'app Tauri GÉNÉRIQUE en mode Viewer (VITE_VIEWER_MODE=true →
+# launcher, cf. player/src/App.tsx). Aucun slug/projet en entrée. Les binaires
+# sont uploadés dans <DATA_DIR>/_viewer/ (servi par /api/public/viewer/download/:os),
+# PAS dans /var/www/propbuilder que deploy.sh rsync --delete écraserait.
+#
+# Déclenché à la main (workflow_dispatch). Sorties légères : exe portable
+# (Windows, --no-bundle) + binaire ELF (Linux, --no-bundle). Dépendances
+# runtime : WebView2 (Windows, préinstallé Win10/11) / WebKitGTK 4.1 (Linux).
+name: Bundle Viewer (desktop)
+
+run-name: "Bundle Viewer desktop (Windows + Linux)"
+
+on:
+  workflow_dispatch:
+
+env:
+  VPS_HOST: 217.182.60.238
+  VPS_USER: noxel
+  DATA_DIR: /var/www/propbuilder-data
+  VITE_VIEWER_MODE: 'true'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows — exe portable
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows EXE (Viewer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: player/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: player/src-tauri
+
+      - name: Install Player dependencies
+        working-directory: player
+        run: npm ci
+
+      - name: Patch tauri.conf.json for the Viewer
+        working-directory: player/src-tauri
+        shell: bash
+        run: |
+          jq '.productName = "PropBuilder Viewer"
+              | .identifier = "com.noxel.propbuilder.viewer"
+              | .app.windows[0].title = "PropBuilder Viewer"
+              | .app.windows[0].width = 1100
+              | .app.windows[0].height = 750
+              | .app.windows[0].resizable = true
+              | .app.windows[0].fullscreen = false' \
+            tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
+
+      - name: Build EXE (portable, viewer mode, unsigned)
+        working-directory: player
+        run: npm run tauri build -- --no-bundle
+
+      - name: Locate EXE
+        id: find_exe
+        shell: bash
+        run: |
+          EXE=$(find player/src-tauri/target/release -maxdepth 1 -name "*.exe" | head -1)
+          if [ -z "$EXE" ]; then
+            echo "No portable exe produced"
+            find player/src-tauri/target -name "*.exe" -maxdepth 4 || true
+            exit 1
+          fi
+          echo "Found EXE: $EXE ($(du -h "$EXE" | cut -f1))"
+          echo "path=$EXE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH to VPS
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload EXE to VPS
+        shell: bash
+        env:
+          EXE_PATH: ${{ steps.find_exe.outputs.path }}
+        run: |
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/_viewer && rm -f ${{ env.DATA_DIR }}/_viewer/PropBuilderViewer-windows.exe"
+          scp "${EXE_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/_viewer/PropBuilderViewer-windows.exe"
+
+  # ---------------------------------------------------------------------------
+  # Linux — binaire ELF
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux binary (Viewer)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: player/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: player/src-tauri
+
+      - name: Install Player dependencies
+        working-directory: player
+        run: npm ci
+
+      - name: Patch tauri.conf.json for the Viewer
+        working-directory: player/src-tauri
+        run: |
+          jq '.productName = "PropBuilder Viewer"
+              | .identifier = "com.noxel.propbuilder.viewer"
+              | .app.windows[0].title = "PropBuilder Viewer"
+              | .app.windows[0].width = 1100
+              | .app.windows[0].height = 750
+              | .app.windows[0].resizable = true
+              | .app.windows[0].fullscreen = false' \
+            tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
+
+      - name: Build binary (portable, viewer mode)
+        working-directory: player
+        run: npm run tauri build -- --no-bundle
+
+      - name: Locate binary
+        id: find_bin
+        run: |
+          # Binaire ELF à la racine de release/ : exécutable, pas un .d / .so.
+          BIN=$(find player/src-tauri/target/release -maxdepth 1 -type f -executable \
+                  ! -name "*.so" ! -name "*.d" | head -1)
+          if [ -z "$BIN" ]; then
+            echo "No Linux binary produced"
+            ls -la player/src-tauri/target/release || true
+            exit 1
+          fi
+          echo "Found binary: $BIN ($(du -h "$BIN" | cut -f1))"
+          echo "path=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH to VPS
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload binary to VPS
+        env:
+          BIN_PATH: ${{ steps.find_bin.outputs.path }}
+        run: |
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p ${{ env.DATA_DIR }}/_viewer && rm -f ${{ env.DATA_DIR }}/_viewer/PropBuilderViewer-linux"
+          rsync -avz "${BIN_PATH}" "${{ env.VPS_USER }}@${{ env.VPS_HOST }}:${{ env.DATA_DIR }}/_viewer/PropBuilderViewer-linux"
