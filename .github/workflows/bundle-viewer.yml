@@ -60,8 +60,11 @@ jobs:
       # ../../src/utils/*) → son tsc compile aussi des fichiers racine dont
       # les deps (gifuct-js…) vivent dans le node_modules RACINE. Sans ce
       # npm ci racine, le build échoue (TS2307 gifuct-js).
+      # --ignore-scripts : le postinstall racine (copie ffmpeg via mkdir -p/cp -f)
+      # est en syntaxe Unix et casse sur le runner Windows. On n'a besoin que des
+      # node_modules pour résoudre gifuct-js au tsc du player, pas des assets ffmpeg.
       - name: Install root dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Install Player dependencies
         working-directory: player
