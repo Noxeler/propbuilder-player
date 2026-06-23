@@ -56,6 +56,13 @@ jobs:
         with:
           workspaces: player/src-tauri
 
+      # Le player principal partage du code avec l'app (player/src importe
+      # ../../src/utils/*) → son tsc compile aussi des fichiers racine dont
+      # les deps (gifuct-js…) vivent dans le node_modules RACINE. Sans ce
+      # npm ci racine, le build échoue (TS2307 gifuct-js).
+      - name: Install root dependencies
+        run: npm ci
+
       - name: Install Player dependencies
         working-directory: player
         run: npm ci
