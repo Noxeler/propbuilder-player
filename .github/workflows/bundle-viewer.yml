@@ -29,7 +29,17 @@ jobs:
     name: Windows EXE (Viewer)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # On build le player MODERNE (DOM) du repo principal PRIVÉ, pas le
+      # player Konva de ce repo : rendu net identique au Mac/navigateur.
+      # propbuilder-player reste public (minutes Actions illimitées) ; le
+      # checkout du repo privé se fait via un PAT fine-grained (Contents:Read
+      # sur Noxeler/PropBuilder) stocké en secret MAIN_REPO_PAT.
+      - name: Checkout main repo (DOM player)
+        uses: actions/checkout@v4
+        with:
+          repository: Noxeler/PropBuilder
+          token: ${{ secrets.MAIN_REPO_PAT }}
+          ref: main
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
