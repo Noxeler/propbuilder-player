@@ -100,6 +100,16 @@ jobs:
               | .app.windows[0].fullscreen = false' \
             tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
 
+      # Le rust-cache restaure un target/ où build.rs du crate `player` a déjà
+      # tourné → cargo ne ré-exécute pas l'embed de l'icône Windows (winres),
+      # donc l'.exe garde l'icône du tout premier build (l'.ico PNG de
+      # `tauri icon`, qui s'affiche « par défaut »). On nettoie le crate player
+      # (pas les deps) pour forcer build.rs à ré-embarquer l'.ico ImageMagick.
+      - name: Force icon re-embed (clean player crate, keep deps cached)
+        working-directory: player/src-tauri
+        shell: bash
+        run: cargo clean --release -p player
+
       - name: Build EXE (portable, viewer mode, unsigned)
         working-directory: player
         run: npm run tauri build -- --no-bundle
