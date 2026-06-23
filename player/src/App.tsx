@@ -6,6 +6,14 @@ import { playSounds } from './soundRegistry'
 import { IosToast, type IosToastData } from './IosToast'
 import { ExplanationPopup } from './ExplanationPopup'
 import { useEntryAnimation } from './useEntryAnimation'
+import { Launcher } from './Launcher'
+import {
+  fetchViewerProject,
+  getCachedProject,
+  cacheProject,
+  addRecent,
+  type ViewerLink,
+} from './viewerLib'
 import type {
   Project,
   App as AppType,
@@ -213,7 +221,20 @@ async function loadAllFonts(project: Project): Promise<void> {
   }
 }
 
+// Mode Viewer : activé par le flag de build VITE_VIEWER_MODE (build desktop
+// générique Windows/Linux). Constante figée à la compilation → le brancheur
+// rend toujours soit ViewerApp, soit PlayerApp, jamais conditionnellement.
+const VIEWER_MODE =
+  (import.meta.env as Record<string, string | undefined>).VITE_VIEWER_MODE ===
+  'true'
+
 function App() {
+  return VIEWER_MODE ? <ViewerApp /> : <PlayerApp />
+}
+
+// PlayerApp : le player « classique » qui charge le project.json baké dans
+// le bundle (builds par-app + Viewer iOS/Android). Inchangé.
+function PlayerApp() {
   const [project, setProject] = useState<Project | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -255,6 +276,101 @@ function App() {
   if (!app) return <Centered>Projet vide.</Centered>
 
   return <PlayerShell project={project} app={app} />
+}
+
+// ViewerApp : mode Viewer desktop. Pas de project.json baké — on part d'un
+// launcher (coller un lien de partage), on fetch le projet avec médias
+// inlinés, on le met en cache local pour l'offline, puis on rend le même
+// PlayerShell. Un lien null = écran launcher.
+function ViewerApp() {
+  const [link, setLink] = useState<ViewerLink | null>(null)
+  const [project, setProject] = useState<Project | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!link) {
+      setProject(null)
+      setError(null)
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setProject(null)
+    ;(async () => {
+      // En ligne d'abord (toujours la version la plus fraîche) ; à défaut,
+      // on retombe sur le cache IndexedDB (réouverture hors-ligne).
+      let proj: Project | null = null
+      let online = false
+      try {
+        proj = await fetchViewerProject(link)
+        online = true
+      } catch {
+        proj = await getCachedProject(link)
+      }
+      if (cancelled) return
+      if (!proj) {
+        setError(
+          "Impossible de charger l'app. Vérifiez le lien et votre connexion (la 1ʳᵉ ouverture nécessite Internet)."
+        )
+        setLoading(false)
+        return
+      }
+      if (online) void cacheProject(link, proj)
+      try {
+        await loadAllFonts(proj)
+      } catch {
+        /* polices best-effort */
+      }
+      if (cancelled) return
+      addRecent(link, proj.apps?.[0]?.name ?? '')
+      setProject(proj)
+      setLoading(false)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [link])
+
+  if (!link) return <Launcher onOpen={setLink} />
+  if (loading) return <Centered>Chargement…</Centered>
+  if (error) {
+    return (
+      <Centered>
+        <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
+          <p className="text-sm text-slate-300">{error}</p>
+          <button
+            onClick={() => setLink(null)}
+            className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600"
+          >
+            ← Retour
+          </button>
+        </div>
+      </Centered>
+    )
+  }
+  if (!project) return <Launcher onOpen={setLink} />
+  const app = project.apps[0]
+  if (!app) return <Centered>Projet vide.</Centered>
+
+  return (
+    <div className="relative h-screen w-screen">
+      <PlayerShell
+        key={`${link.slug}/${link.appSlug}`}
+        project={project}
+        app={app}
+      />
+      {/* Retour au launcher — semi-transparent pour ne pas masquer le contenu */}
+      <button
+        onClick={() => setLink(null)}
+        title="Revenir à mes apps"
+        className="fixed left-3 top-3 z-[100] rounded-full bg-black/55 px-3 py-1.5 text-xs font-medium text-white backdrop-blur transition-colors hover:bg-black/75"
+      >
+        ← Mes apps
+      </button>
+    </div>
+  )
 }
 
 function PlayerShell({
