@@ -77,6 +77,16 @@ jobs:
         working-directory: player
         run: npm run tauri -- icon src-tauri/viewer-icon.png
 
+      # tauri icon produit un icon.ico dont les grandes tailles sont en PNG,
+      # qui s'embarque mal dans l'.exe Windows (winres) → icône absente dans
+      # l'Explorer. On régénère donc l'.ico avec ImageMagick (format multi-BMP
+      # classique), exactement comme les builds par-app (bundle-player.yml),
+      # dont l'icône .exe fonctionne. magick est préinstallé sur windows-latest.
+      - name: Force Windows .ico (ImageMagick, comme les builds par-app)
+        working-directory: player/src-tauri
+        shell: bash
+        run: magick viewer-icon.png -define icon:auto-resize=256,128,64,32,16 icons/icon.ico
+
       - name: Patch tauri.conf.json for the Viewer
         working-directory: player/src-tauri
         shell: bash
