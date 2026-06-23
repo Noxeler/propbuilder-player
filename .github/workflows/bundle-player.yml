@@ -55,7 +55,17 @@ jobs:
     name: Android APK (Capacitor)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Build le player MODERNE (DOM) du repo principal privé, PAS le player
+      # Konva vendoré de ce repo : slides de page + rendu net (pas de
+      # Konva.pixelRatio floored sur écran HiDPI) + souligné au survol,
+      # identiques au web/Mac. Checkout via PAT fine-grained MAIN_REPO_PAT
+      # (Contents:Read sur Noxeler/PropBuilder), comme bundle-viewer.yml.
+      - name: Checkout main repo (DOM player)
+        uses: actions/checkout@v4
+        with:
+          repository: Noxeler/PropBuilder
+          token: ${{ secrets.MAIN_REPO_PAT }}
+          ref: main
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -77,6 +87,14 @@ jobs:
 
       - name: Install librsvg + imagemagick
         run: sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin imagemagick
+
+      # Le player DOM importe ../../src/utils/* : son tsc compile des fichiers
+      # racine dont les deps (gifuct-js…) vivent dans le node_modules RACINE.
+      # Sans ce npm ci racine, le build échoue (TS2307). --ignore-scripts car
+      # le postinstall racine (copie ffmpeg, syntaxe Unix) casse sur Windows
+      # et n'est pas nécessaire ici (on ne veut que les deps pour le tsc).
+      - name: Install root dependencies (DOM player)
+        run: npm ci --ignore-scripts
 
       - name: Install Player dependencies
         working-directory: player
@@ -516,7 +534,17 @@ jobs:
     name: macOS DMG (universal)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      # Build le player MODERNE (DOM) du repo principal privé, PAS le player
+      # Konva vendoré de ce repo : slides de page + rendu net (pas de
+      # Konva.pixelRatio floored sur écran HiDPI) + souligné au survol,
+      # identiques au web/Mac. Checkout via PAT fine-grained MAIN_REPO_PAT
+      # (Contents:Read sur Noxeler/PropBuilder), comme bundle-viewer.yml.
+      - name: Checkout main repo (DOM player)
+        uses: actions/checkout@v4
+        with:
+          repository: Noxeler/PropBuilder
+          token: ${{ secrets.MAIN_REPO_PAT }}
+          ref: main
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -534,6 +562,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: player/src-tauri
+
+      # Le player DOM importe ../../src/utils/* : son tsc compile des fichiers
+      # racine dont les deps (gifuct-js…) vivent dans le node_modules RACINE.
+      # Sans ce npm ci racine, le build échoue (TS2307). --ignore-scripts car
+      # le postinstall racine (copie ffmpeg, syntaxe Unix) casse sur Windows
+      # et n'est pas nécessaire ici (on ne veut que les deps pour le tsc).
+      - name: Install root dependencies (DOM player)
+        run: npm ci --ignore-scripts
 
       - name: Install Player dependencies
         working-directory: player
@@ -808,7 +844,17 @@ jobs:
     name: Windows EXE
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # Build le player MODERNE (DOM) du repo principal privé, PAS le player
+      # Konva vendoré de ce repo : slides de page + rendu net (pas de
+      # Konva.pixelRatio floored sur écran HiDPI) + souligné au survol,
+      # identiques au web/Mac. Checkout via PAT fine-grained MAIN_REPO_PAT
+      # (Contents:Read sur Noxeler/PropBuilder), comme bundle-viewer.yml.
+      - name: Checkout main repo (DOM player)
+        uses: actions/checkout@v4
+        with:
+          repository: Noxeler/PropBuilder
+          token: ${{ secrets.MAIN_REPO_PAT }}
+          ref: main
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -824,6 +870,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: player/src-tauri
+
+      # Le player DOM importe ../../src/utils/* : son tsc compile des fichiers
+      # racine dont les deps (gifuct-js…) vivent dans le node_modules RACINE.
+      # Sans ce npm ci racine, le build échoue (TS2307). --ignore-scripts car
+      # le postinstall racine (copie ffmpeg, syntaxe Unix) casse sur Windows
+      # et n'est pas nécessaire ici (on ne veut que les deps pour le tsc).
+      - name: Install root dependencies (DOM player)
+        run: npm ci --ignore-scripts
 
       - name: Install Player dependencies
         working-directory: player
