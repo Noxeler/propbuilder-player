@@ -34,10 +34,10 @@ jobs:
       # propbuilder-player reste public (minutes Actions illimitées) ; le
       # checkout du repo privé se fait via un PAT fine-grained (Contents:Read
       # sur Noxeler/PropBuilder) stocké en secret MAIN_REPO_PAT.
-      # Le dépôt principal contient .twa/ (intermédiaires de build Gradle
-      # commités par accident) dont un chemin dépasse les 260 caractères
-      # de Windows : sans longpaths, le checkout meurt sur « Filename too
-      # long » avant même de compiler.
+      # Garde-fou : un chemin de plus de 260 caractères dans le dépôt
+      # principal fait mourir le checkout Windows sur « Filename too
+      # long » avant même de compiler. C'est arrivé le 2026-08-19 avec un
+      # dossier de build Gradle commité par accident, retiré depuis.
       - name: Autoriser les chemins longs
         run: git config --system core.longpaths true
 
